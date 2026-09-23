@@ -149,9 +149,21 @@ if not df.empty and metrics:
             """
 
             try:
-                model = genai.GenerativeModel('gemini-1.5-flash-latest')
-                response = model.generate_content(agent_prompt)
-                response_ml = response.text
+                # Fallback mechanism across valid standard models
+                models_to_try = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro']
+                response_text = None
+                
+                for m in models_to_try:
+                    try:
+                        model = genai.GenerativeModel(m)
+                        res = model.generate_content(agent_prompt)
+                        if res and res.text:
+                            response_text = res.text
+                            break
+                    except Exception:
+                        continue
+                
+                response_ml = response_text if response_text else "AI വിവരങ്ങൾ ലഭ്യമല്ല."
             except Exception as e:
                 response_ml = f"AI ലഭിക്കുന്നതിൽ തടസ്സം നേരിട്ടു: {str(e)}"
         else:
