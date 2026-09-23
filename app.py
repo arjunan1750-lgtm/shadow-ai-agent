@@ -10,10 +10,10 @@ import re
 import google.generativeai as genai
 from streamlit_mic_recorder import speech_to_text
 
-# Page Configuration & Dark Theme (Sidebar Hidden)
+# 1. Set Page Configuration with Cat Icon 🐱
 st.set_page_config(
-    page_title="Shadow AI Agent", 
-    page_icon="🤖", 
+    page_title="Shadow AI Agent 🐱", 
+    page_icon="🐱", 
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -24,81 +24,46 @@ st.markdown("""
     [data-testid="collapsedControl"] { display: none; }
     section[data-testid="stSidebar"] { display: none; }
     .stApp { background-color: #0e1117; color: #ffffff; }
-    .chat-box { background-color: #1e222d; padding: 18px; border-radius: 12px; border-left: 5px solid #2962ff; margin-bottom: 15px; font-size: 16px; }
-    .news-box { background-color: #1a1d24; padding: 12px 16px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #2d313e; }
+    .chat-box { background-color: #1e222d; padding: 18px; border-radius: 12px; border-left: 5px solid #2962ff; margin-bottom: 15px; font-size: 15px; }
+    .news-box { background-color: #1a1d24; padding: 12px 16px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #2d313e; }
+    .metric-card { background-color: #1e222d; padding: 15px; border-radius: 10px; border: 1px solid #2962ff; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
 
-# 1. Initialize Gemini API Key
+# Initialize Session States for Journal & Capital Management
+if "journal_logs" not in st.session_state:
+    st.session_state.journal_logs = pd.DataFrame(columns=["Date", "Stock", "Type", "Entry", "Exit", "Qty", "P&L", "R:R", "Notes"])
+
+if "initial_capital" not in st.session_state:
+    st.session_state.initial_capital = 100000.0
+
+if "target_capital" not in st.session_state:
+    st.session_state.target_capital = 200000.0
+
+if "daily_updates" not in st.session_state:
+    st.session_state.daily_updates = pd.DataFrame(columns=["Date", "Daily P&L", "Total Capital"])
+
+# API Initialization
 api_key = st.secrets.get("GEMINI_API_KEY", None)
 if api_key:
     genai.configure(api_key=api_key)
 
-# Dynamic Stock Symbol Resolver for ALL NSE/BSE Stocks
+# Ticker Resolver
 def resolve_indian_stock_ticker(query: str) -> str:
-    """Dynamically converts any Indian stock name or symbol into an NSE/BSE ticker."""
     query_clean = query.upper().strip()
-    
-    # Common mappings for aliases / popular indices
     alias_map = {
-        "NIFTY": "^NSEI",
-        "BANKNIFTY": "^NSEBANK",
-        "SENSEX": "^BSESN",
-        "RELIANCE": "RELIANCE.NS",
-        "TCS": "TCS.NS",
-        "INFY": "INFY.NS",
-        "INFOSYS": "INFY.NS",
-        "HDFC": "HDFCBANK.NS",
-        "HDFCBANK": "HDFCBANK.NS",
-        "ICICI": "ICICIBANK.NS",
-        "SBI": "SBIN.NS",
-        "SBIN": "SBIN.NS",
-        "TATA MOTORS": "TATAMOTORS.NS",
-        "TATAMOTORS": "TATAMOTORS.NS"
+        "NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK", "SENSEX": "^BSESN",
+        "RELIANCE": "RELIANCE.NS", "TCS": "TCS.NS", "INFY": "INFY.NS",
+        "INFOSYS": "INFY.NS", "HDFC": "HDFCBANK.NS", "HDFCBANK": "HDFCBANK.NS",
+        "ICICI": "ICICIBANK.NS", "SBI": "SBIN.NS", "SUZLON": "SUZLON.NS"
     }
-    
     for key, ticker in alias_map.items():
         if key in query_clean:
             return ticker
+    if query_clean.endswith(".NS") or query_clean.endswith(".BO") or query_clean.startswith("^"):
+        return query_clean
+    return f"{query_clean}.NS"
 
-    # Stopwords to clean out of user prompts
-    ignore_words = {
-        "CHART", "SHOW", "MARK", "LEVEL", "STOCK", "NEWS", "OPEN", "POC", 
-        "SUPPORT", "RESISTANCE", "SMA", "GRAPH", "PLOT", "PRICE", "FOR", 
-        "OF", "THE", "AND", "IN", "ME", "PLEASE", "WHAT", "IS"
-    }
-    
-    words = [w for w in re.findall(r'\b[A-Z0-9&]+\b', query_clean) if w not in ignore_words]
-    
-    if not words:
-        return "RELIANCE.NS"
-
-    # Try extracted target as NSE symbol first, then BSE symbol
-    candidate = words[0]
-    if candidate.endswith(".NS") or candidate.endswith(".BO") or candidate.startswith("^"):
-        return candidate
-
-    # Test candidate on NSE
-    nse_symbol = f"{candidate}.NS"
-    try:
-        data = yf.Ticker(nse_symbol).history(period="1d")
-        if not data.empty:
-            return nse_symbol
-    except Exception:
-        pass
-
-    # Fallback to BSE if NSE fails
-    bse_symbol = f"{candidate}.BO"
-    try:
-        data = yf.Ticker(bse_symbol).history(period="1d")
-        if not data.empty:
-            return bse_symbol
-    except Exception:
-        pass
-
-    return nse_symbol
-
-# Helper Data Functions
 @st.cache_data(ttl=60)
 def fetch_stock_data(symbol: str) -> pd.DataFrame:
     try:
@@ -112,165 +77,209 @@ def fetch_stock_news(symbol: str):
     try:
         ticker = yf.Ticker(symbol)
         raw_news = ticker.news
-        cleaned_news = []
+        cleaned = []
         if raw_news:
-            for item in raw_news[:3]:
+            for item in raw_news[:4]:
                 title = item.get('title') or item.get('content', {}).get('title', 'Market News Update')
                 publisher = item.get('publisher') or item.get('content', {}).get('provider', {}).get('displayName', 'Finance News')
-                cleaned_news.append({"title": title, "publisher": publisher})
-        return cleaned_news
+                cleaned.append({"title": title, "publisher": publisher})
+        return cleaned
     except Exception:
         return []
 
-def analyze_market_data(df: pd.DataFrame) -> dict:
-    if df.empty:
+def analyze_smc_data(df: pd.DataFrame) -> dict:
+    if df.empty or len(df) < 20:
         return {}
     latest_close = float(df['Close'].iloc[-1])
-    support = float(df['Low'].min())
-    resistance = float(df['High'].max())
+    day_high = float(df['High'].max())
+    day_low = float(df['Low'].min())
+    
+    df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
+    df['VWAP'] = (df['TP'] * df['Volume']).cumsum() / df['Volume'].cumsum()
+    vwap_val = float(df['VWAP'].iloc[-1])
+
+    ema_20 = float(df['Close'].ewm(span=20, adjust=False).mean().iloc[-1])
+    ema_50 = float(df['Close'].ewm(span=50, adjust=False).mean().iloc[-1])
+
     df['Price_Bin'] = df['Close'].round(1)
     poc_level = float(df.groupby('Price_Bin')['Volume'].sum().idxmax())
-    sma_20 = float(df['Close'].rolling(window=20).mean().iloc[-1]) if len(df) >= 20 else latest_close
+
+    demand_zone = float(df[df['Close'] < vwap_val]['Low'].min()) if not df[df['Close'] < vwap_val].empty else day_low
+    supply_zone = float(df[df['Close'] > vwap_val]['High'].max()) if not df[df['Close'] > vwap_val].empty else day_high
+
+    trend = "BULLISH 📈" if ema_20 > ema_50 else "BEARISH 📉"
+    structure = "Breakout (BOS)" if latest_close > df['High'].iloc[-5:-1].max() else ("Breakdown (CHoCH)" if latest_close < df['Low'].iloc[-5:-1].min() else "Consolidation (Range)")
+
+    bias = "STRONG BUY 🟢" if (latest_close > vwap_val and ema_20 > ema_50) else ("STRONG SELL 🔴" if latest_close < vwap_val else "NEUTRAL 🟡")
+
     return {
-        "latest_close": round(latest_close, 2),
-        "support": round(support, 2),
-        "resistance": round(resistance, 2),
-        "poc": round(poc_level, 2),
-        "sma_20": round(sma_20, 2)
+        "latest_close": round(latest_close, 2), "day_high": round(day_high, 2), "day_low": round(day_low, 2),
+        "poc": round(poc_level, 2), "vwap": round(vwap_val, 2), "ema_20": round(ema_20, 2), "ema_50": round(ema_50, 2),
+        "supply_zone": round(supply_zone, 2), "demand_zone": round(demand_zone, 2), "trend": trend,
+        "structure": structure, "bias": bias
     }
 
-def generate_audio(text: str, lang: str = 'en'):
-    try:
-        tts = gtts.gTTS(text=text, lang=lang)
-        fp = io.BytesIO()
-        tts.write_to_fp(fp)
-        fp.seek(0)
-        b64_audio = base64.b64encode(fp.read()).decode()
-        return f'<audio autoplay controls src="data:audio/mp3;base64,{b64_audio}"></audio>'
-    except Exception:
-        return ""
+# --- NAVIGATION TABS ---
+tab_market, tab_dashboard, tab_journal = st.tabs(["📈 Market & Chart Analysis", "📊 Capital & Target Dashboard", "📓 Stock Journal"])
 
-# --- MAIN CHAT INTERFACE ---
-st.title("🤖 SHADOW AI AGENT")
-st.caption("Ask anything about ANY NSE/BSE listed stock (e.g. Zomato, Suzlon, JioFin, Tata Power), charts, POC levels, or news.")
-
-# Voice & Text Inputs
-col_input1, col_input2 = st.columns([1, 4])
-with col_input1:
-    spoken_text = speech_to_text(language='ml-IN', start_prompt="🎙️ Speak / സംസാരിക്കാം", stop_prompt="⏹️ Stop", key='voice_input')
-
-with col_input2:
-    typed_text = st.text_input("Type stock question here (English / മലയാളം):", key="text_query")
-
-user_query = spoken_text if spoken_text else typed_text
-
-# Process Query
-if user_query:
-    st.markdown(f"**Your Query:** *{user_query}*")
+# ==========================================
+# TAB 1: CHART ANALYSIS ENGINE
+# ==========================================
+with tab_market:
+    st.title("🐱 Shadow AI Technical Analysis")
+    spoken_text = speech_to_text(language='ml-IN', start_prompt="🎙️ Voice Input", stop_prompt="⏹️ Stop", key='voice_input')
+    stock_query = st.text_input("1️⃣ Stock Name / Ticker (e.g. SUZLON, RELIANCE, TCS):", key="stock_name")
     
-    query_lower = user_query.lower()
-    target_symbol = resolve_indian_stock_ticker(user_query)
+    condition_input = ""
+    if stock_query or spoken_text:
+        condition_input = st.text_input("2️⃣ Conditions (Separate with ';'):", placeholder="e.g. 1day high; supply zone; demand zone; poc; vwap; news", key="conditions_input")
+
+    target_stock = spoken_text if spoken_text else stock_query
+    if target_stock:
+        target_symbol = resolve_indian_stock_ticker(target_stock)
+        df = fetch_stock_data(target_symbol)
+        metrics = analyze_smc_data(df)
+        raw_conditions = [c.strip().lower() for c in condition_input.split(";") if c.strip()] if condition_input else []
+
+        if not df.empty:
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_width=[0.2, 0.8])
+            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+
+            if any("ema" in c for c in raw_conditions):
+                fig.add_trace(go.Scatter(x=df.index, y=df['Close'].ewm(span=20).mean(), line=dict(color='#ffb74d'), name="20 EMA"), row=1, col=1)
+            if any("high" in c for c in raw_conditions) or not raw_conditions:
+                fig.add_hline(y=metrics['day_high'], line_dash="dash", line_color="#00e676", annotation_text=f"High: ₹{metrics['day_high']}", row=1, col=1)
+            if any("low" in c for c in raw_conditions) or not raw_conditions:
+                fig.add_hline(y=metrics['day_low'], line_dash="dash", line_color="#ff5252", annotation_text=f"Low: ₹{metrics['day_low']}", row=1, col=1)
+            if any("supply" in c for c in raw_conditions):
+                fig.add_hline(y=metrics['supply_zone'], line_color="#d50000", annotation_text=f"Supply: ₹{metrics['supply_zone']}", row=1, col=1)
+            if any("demand" in c for c in raw_conditions):
+                fig.add_hline(y=metrics['demand_zone'], line_color="#00c853", annotation_text=f"Demand: ₹{metrics['demand_zone']}", row=1, col=1)
+            if any("vwap" in c for c in raw_conditions):
+                fig.add_hline(y=metrics['vwap'], line_dash="dash", line_color="#ff4081", annotation_text=f"VWAP: ₹{metrics['vwap']}", row=1, col=1)
+            if any("poc" in c for c in raw_conditions) or not raw_conditions:
+                fig.add_hline(y=metrics['poc'], line_dash="dot", line_color="#ab47bc", annotation_text=f"POC: ₹{metrics['poc']}", row=1, col=1)
+
+            fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name="Volume", marker_color='#2962ff'), row=2, col=1)
+            fig.update_layout(template="plotly_dark", height=450, margin=dict(l=10, r=10, t=10, b=10), xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+            col_news, col_signal = st.columns([1, 1])
+            with col_news:
+                st.subheader(f"📰 Live News: {target_symbol}")
+                for item in fetch_stock_news(target_symbol):
+                    st.markdown(f'<div class="news-box"><b>{item["publisher"]}</b><br>{item["title"]}</div>', unsafe_allow_html=True)
+
+            with col_signal:
+                st.subheader("🎯 Trade Signal")
+                st.write(f"**Bias:** {metrics.get('bias')}")
+                st.write(f"**Trend:** {metrics.get('trend')} | **Structure:** {metrics.get('structure')}")
+                st.write(f"**Supply Target:** ₹{metrics.get('supply_zone')} | **Demand Stop:** ₹{metrics.get('demand_zone')}")
+
+# ==========================================
+# TAB 2: CAPITAL & TARGET DASHBOARD
+# ==========================================
+with tab_dashboard:
+    st.title("📊 Financial Target & Capital Dashboard")
+
+    col_cap1, col_cap2 = st.columns(2)
+    with col_cap1:
+        st.session_state.initial_capital = st.number_input("Starting Capital (₹):", value=st.session_state.initial_capital, step=5000.0)
+    with col_cap2:
+        st.session_state.target_capital = st.number_input("Target Capital (₹):", value=st.session_state.target_capital, step=10000.0)
+
+    # Daily Profit Update Input
+    st.subheader("➕ Add Today's Profit / Loss")
+    c_date, c_pnl, c_btn = st.columns([2, 2, 1])
+    update_date = c_date.date_input("Date:", key="pnl_date")
+    daily_pnl = c_pnl.number_input("Profit / Loss Amount (₹):", value=0.0, step=500.0, key="pnl_val")
+
+    if c_btn.button("Update Capital"):
+        current_total = st.session_state.initial_capital + st.session_state.daily_updates["Daily P&L"].sum() + daily_pnl
+        new_row = pd.DataFrame([{"Date": str(update_date), "Daily P&L": daily_pnl, "Total Capital": current_total}])
+        st.session_state.daily_updates = pd.concat([st.session_state.daily_updates, new_row], ignore_index=True)
+        st.success("Capital updated successfully!")
+
+    # Calculate Capital Analytics
+    total_pnl = st.session_state.daily_updates["Daily P&L"].sum() if not st.session_state.daily_updates.empty else 0.0
+    current_balance = st.session_state.initial_capital + total_pnl
+    growth_pct = ((current_balance - st.session_state.initial_capital) / st.session_state.initial_capital) * 100
     
-    # Intent Detection
-    show_chart_intent = any(w in query_lower for w in ["chart", "show chart", "open chart", "graph", "plot", "poc", "level", "mark", "support", "resistance", "sma"])
-    show_news_intent = any(w in query_lower for w in ["news", "update", "latest", "വാർത്ത"])
+    distance_to_target = st.session_state.target_capital - current_balance
+    target_pct_remaining = (distance_to_target / st.session_state.target_capital) * 100 if st.session_state.target_capital > 0 else 0
 
-    # Specific Markers requested
-    mark_poc = "poc" in query_lower
-    mark_support = "support" in query_lower
-    mark_resistance = "resistance" in query_lower
-    mark_sma = "sma" in query_lower or "average" in query_lower
+    st.markdown("---")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Current Capital", f"₹{current_balance:,.2f}")
+    m2.metric("Total P&L Growth", f"{growth_pct:+.2f}%", f"₹{total_pnl:,.2f}")
+    m3.metric("Target Goal", f"₹{st.session_state.target_capital:,.2f}")
+    m4.metric("Distance to Target", f"₹{distance_to_target:,.2f}", f"{target_pct_remaining:.1f}% remaining")
 
-    # Default to POC line when a chart is requested
-    if show_chart_intent and not (mark_poc or mark_support or mark_resistance or mark_sma):
-        mark_poc = True
+    st.progress(min(max(current_balance / st.session_state.target_capital, 0.0), 1.0))
 
-    # Fetch Data
-    df = fetch_stock_data(target_symbol)
-    metrics = analyze_market_data(df)
-    news_list = fetch_stock_news(target_symbol) if show_news_intent else []
+    if not st.session_state.daily_updates.empty:
+        st.subheader("📈 Capital Growth Progress")
+        st.line_chart(st.session_state.daily_updates.set_index("Date")["Total Capital"])
 
-    # 1. Dynamic Conversational AI Agent
-    if api_key:
-        agent_prompt = f"""
-        You are Shadow AI, an expert real-time stock market assistant for Indian listed stocks on NSE and BSE.
+# ==========================================
+# TAB 3: STOCK JOURNAL & DYNAMIC AI RISK:REWARD
+# ==========================================
+with tab_journal:
+    st.title("📓 Trade Journal & AI Risk:Reward Calculator")
 
-        STOCK MARKET DATA FOR {target_symbol}:
-        - Latest Price: ₹{metrics.get('latest_close', 'N/A')}
-        - Point of Control (POC) Volume Level: ₹{metrics.get('poc', 'N/A')}
-        - Support Level: ₹{metrics.get('support', 'N/A')}
-        - Resistance Level: ₹{metrics.get('resistance', 'N/A')}
-        - 20 Simple Moving Average (SMA): ₹{metrics.get('sma_20', 'N/A')}
+    col_j1, col_j2 = st.columns([2, 1])
 
-        USER QUERY: "{user_query}"
+    with col_j1:
+        st.subheader("📝 Log New Trade")
+        with st.form("trade_form"):
+            tf_stock = st.text_input("Stock Symbol (e.g. SUZLON)")
+            tf_type = st.selectbox("Type", ["BUY", "SELL"])
+            tf_entry = st.number_input("Entry Price (₹)", min_value=0.1, step=1.0)
+            tf_exit = st.number_input("Target / Exit Price (₹)", min_value=0.1, step=1.0)
+            tf_sl = st.number_input("Stop Loss (₹)", min_value=0.1, step=1.0)
+            tf_qty = st.number_input("Quantity", min_value=1, value=100)
+            tf_notes = st.text_area("Trade Setup / Strategy Notes")
+            submit = st.form_submit_button("Save Trade Log")
 
-        INSTRUCTIONS:
-        1. If the user asked in Malayalam or used Malayalam words, reply in clear Malayalam. Otherwise, answer in English.
-        2. Give precise market analysis for {target_symbol}.
-        """
+            if submit and tf_entry > 0 and tf_sl > 0:
+                pnl = (tf_exit - tf_entry) * tf_qty if tf_type == "BUY" else (tf_entry - tf_exit) * tf_qty
+                risk = abs(tf_entry - tf_sl)
+                reward = abs(tf_exit - tf_entry)
+                rr_ratio = round(reward / risk, 2) if risk > 0 else 0.0
 
-        try:
-            models_to_try = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro']
-            response_text = None
-            for m in models_to_try:
-                try:
-                    model = genai.GenerativeModel(m)
-                    res = model.generate_content(agent_prompt)
-                    if res and res.text:
-                        response_text = res.text
-                        break
-                except Exception:
-                    continue
-            response_ml = response_text if response_text else "Unable to fetch AI response."
-        except Exception as e:
-            response_ml = f"AI Error: {str(e)}"
+                new_trade = pd.DataFrame([{
+                    "Date": str(pd.Timestamp.now().date()), "Stock": tf_stock.upper(), "Type": tf_type,
+                    "Entry": tf_entry, "Exit": tf_exit, "Qty": tf_qty, "P&L": round(pnl, 2), "R:R": f"1:{rr_ratio}", "Notes": tf_notes
+                }])
+                st.session_state.journal_logs = pd.concat([st.session_state.journal_logs, new_trade], ignore_index=True)
+                st.success("Trade added to journal!")
+
+    with col_j2:
+        st.subheader("🤖 AI Dynamic Risk:Reward Assister")
+        calc_entry = st.number_input("Entry Price", value=100.0, key="c_entry")
+        calc_sl = st.number_input("Stop Loss", value=95.0, key="c_sl")
+        calc_target = st.number_input("Target Price", value=115.0, key="c_tgt")
+        max_risk_amount = st.number_input("Max Risk Per Trade (₹)", value=2000.0, key="c_risk")
+
+        risk_per_share = abs(calc_entry - calc_sl)
+        reward_per_share = abs(calc_target - calc_entry)
+        
+        if risk_per_share > 0:
+            rr = reward_per_share / risk_per_share
+            suggested_qty = int(max_risk_amount / risk_per_share)
+            st.markdown(f"### R:R Ratio: **1 : {rr:.2f}**")
+            st.info(f"💡 **Suggested Position Size:** {suggested_qty} shares (Max Risk: ₹{max_risk_amount})")
+            
+            if rr < 1.5:
+                st.warning("⚠️ Poor Risk:Reward ratio (< 1.5). Consider adjusting entry or target.")
+            else:
+                st.success("✅ Good Trade Setup with high expectancy.")
+        else:
+            st.error("Stop Loss cannot equal Entry Price.")
+
+    st.markdown("---")
+    st.subheader("📋 Trade Logs History")
+    if not st.session_state.journal_logs.empty:
+        st.dataframe(st.session_state.journal_logs, use_container_width=True)
     else:
-        response_ml = "Please set a valid Gemini API Key."
-
-    # Render AI Answer
-    st.markdown(f'<div class="chat-box"><b>🤖 Shadow AI:</b><p>{response_ml}</p></div>', unsafe_allow_html=True)
-
-    # Audio Voice Output
-    is_malayalam = any('\u0d00' <= char <= '\u0d7f' for char in response_ml)
-    audio_html = generate_audio(response_ml, lang='ml' if is_malayalam else 'en')
-    if audio_html:
-        st.components.v1.html(audio_html, height=50)
-
-    # 2. Show News if requested
-    if show_news_intent and news_list:
-        st.subheader(f"📰 Live News for {target_symbol}")
-        for article in news_list:
-            st.markdown(f'<div class="news-box"><b>{article["publisher"]}:</b> {article["title"]}</div>', unsafe_allow_html=True)
-
-    # 3. Automatically Open Chart and Mark Requested Levels
-    if show_chart_intent and not df.empty:
-        st.subheader(f"📈 {target_symbol} Chart")
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_width=[0.2, 0.8])
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
-
-        if mark_poc:
-            fig.add_hline(
-                y=metrics['poc'], line_dash="dot", line_color="#ab47bc", line_width=2,
-                annotation_text=f"POC: ₹{metrics['poc']}", annotation_position="bottom right", row=1, col=1
-            )
-        if mark_support:
-            fig.add_hline(
-                y=metrics['support'], line_dash="dash", line_color="#00e676", line_width=2,
-                annotation_text=f"Support: ₹{metrics['support']}", annotation_position="bottom left", row=1, col=1
-            )
-        if mark_resistance:
-            fig.add_hline(
-                y=metrics['resistance'], line_dash="dash", line_color="#ff5252", line_width=2,
-                annotation_text=f"Resistance: ₹{metrics['resistance']}", annotation_position="top right", row=1, col=1
-            )
-        if mark_sma:
-            fig.add_hline(
-                y=metrics['sma_20'], line_dash="dashdot", line_color="#ffb74d", line_width=2,
-                annotation_text=f"20 SMA: ₹{metrics['sma_20']}", annotation_position="top left", row=1, col=1
-            )
-
-        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name="Volume", marker_color='#2962ff'), row=2, col=1)
-        fig.update_layout(template="plotly_dark", height=450, margin=dict(l=10, r=10, t=10, b=10), xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-    elif show_chart_intent and df.empty:
-        st.warning(f"Could not load chart for '{target_symbol}'. Please verify the stock symbol or ticker name.")
+        st.info("No trade logs available yet.")
