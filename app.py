@@ -149,7 +149,7 @@ if not df.empty and metrics:
             """
 
             try:
-                model = genai.GenerativeModel('gemini-2.5-flash')
+                model = genai.GenerativeModel('gemini-1.5-flash-latest')
                 response = model.generate_content(agent_prompt)
                 response_ml = response.text
             except Exception as e:
