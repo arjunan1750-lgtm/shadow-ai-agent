@@ -46,7 +46,6 @@ def fetch_stock_news(symbol: str):
         cleaned_news = []
         if raw_news:
             for item in raw_news[:3]:
-                # Handles both legacy and updated yfinance dict structures
                 title = item.get('title') or item.get('content', {}).get('title', 'Market News Update')
                 publisher = item.get('publisher') or item.get('content', {}).get('provider', {}).get('displayName', 'Finance News')
                 cleaned_news.append({"title": title, "publisher": publisher})
@@ -150,7 +149,7 @@ if not df.empty and metrics:
             """
 
             try:
-                model = genai.GenerativeModel('gemini-1.5-flash')
+                model = genai.GenerativeModel('gemini-2.5-flash')
                 response = model.generate_content(agent_prompt)
                 response_ml = response.text
             except Exception as e:
