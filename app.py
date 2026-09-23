@@ -9,6 +9,7 @@ import io
 import google.generativeai as genai
 from streamlit_mic_recorder import speech_to_text
 
+# Page Configuration & Dark Theme
 st.set_page_config(page_title="Shadow AI Agent", page_icon="🤖", layout="wide")
 
 st.markdown("""
@@ -19,7 +20,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 1. Initialize Gemini API Key from Secrets or Sidebar
+# 1. Initialize Gemini API Key from Streamlit Secrets or Sidebar Input
 api_key = st.secrets.get("GEMINI_API_KEY", None)
 
 if not api_key:
@@ -28,7 +29,7 @@ if not api_key:
 if api_key:
     genai.configure(api_key=api_key)
 
-# 2. Market Data Retrieval
+# 2. Market Data Retrieval Engine
 @st.cache_data(ttl=60)
 def fetch_stock_data(symbol: str) -> pd.DataFrame:
     try:
@@ -38,9 +39,18 @@ def fetch_stock_data(symbol: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 def fetch_stock_news(symbol: str):
+    """Fetches real-time stock news with safe structure parsing."""
     try:
         ticker = yf.Ticker(symbol)
-        return ticker.news[:3] if ticker.news else []
+        raw_news = ticker.news
+        cleaned_news = []
+        if raw_news:
+            for item in raw_news[:3]:
+                # Handles both legacy and updated yfinance dict structures
+                title = item.get('title') or item.get('content', {}).get('title', 'Market News Update')
+                publisher = item.get('publisher') or item.get('content', {}).get('provider', {}).get('displayName', 'Finance News')
+                cleaned_news.append({"title": title, "publisher": publisher})
+        return cleaned_news
     except Exception:
         return []
 
@@ -64,6 +74,7 @@ def analyze_market_data(df: pd.DataFrame) -> dict:
     }
 
 def generate_malayalam_audio(text: str):
+    """Converts response text to playable Malayalam MP3 audio."""
     tts = gtts.gTTS(text=text, lang='ml')
     fp = io.BytesIO()
     tts.write_to_fp(fp)
@@ -71,10 +82,10 @@ def generate_malayalam_audio(text: str):
     b64_audio = base64.b64encode(fp.read()).decode()
     return f'<audio autoplay controls src="data:audio/mp3;base64,{b64_audio}"></audio>'
 
-# Main Dashboard
+# 3. Main Dashboard UI
 st.title("🤖 SHADOW AI AGENT (Autonomous Stock Analyst)")
 
-watchlist = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", "TATAMOTORS.NS", "SBIN.NS"]
+watchlist = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", "TATAMOTORS.NS", "SBIN.NS", "BHARTIARTL.NS"]
 selected_stock = st.sidebar.selectbox("Select Indian Stock:", watchlist)
 
 df = fetch_stock_data(selected_stock)
@@ -84,28 +95,29 @@ news_list = fetch_stock_news(selected_stock)
 if not df.empty and metrics:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Current Price", f"₹{metrics['latest_close']}")
-    col2.metric("Support", f"₹{metrics['support']}")
-    col3.metric("Resistance", f"₹{metrics['resistance']}")
-    col4.metric("POC Level", f"₹{metrics['poc']}")
+    col2.metric("Support Level", f"₹{metrics['support']}")
+    col3.metric("Resistance Level", f"₹{metrics['resistance']}")
+    col4.metric("POC Volume Level", f"₹{metrics['poc']}")
 
+    # Plotly Candlestick & Volume Chart
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_width=[0.2, 0.8])
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
-    fig.add_hline(y=metrics['resistance'], line_dash="dash", line_color="#ff5252", row=1, col=1)
-    fig.add_hline(y=metrics['support'], line_dash="dash", line_color="#00e676", row=1, col=1)
-    fig.add_hline(y=metrics['poc'], line_dash="dot", line_color="#ab47bc", row=1, col=1)
+    fig.add_hline(y=metrics['resistance'], line_dash="dash", line_color="#ff5252", annotation_text="Resistance", row=1, col=1)
+    fig.add_hline(y=metrics['support'], line_dash="dash", line_color="#00e676", annotation_text="Support", row=1, col=1)
+    fig.add_hline(y=metrics['poc'], line_dash="dot", line_color="#ab47bc", annotation_text="POC Level", row=1, col=1)
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name="Volume", marker_color='#2962ff'), row=2, col=1)
     fig.update_layout(template="plotly_dark", height=420, margin=dict(l=10, r=10, t=10, b=10), xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Market News
-    st.subheader("📰 Live Market News")
+    # Market News Display
+    st.subheader("📰 Live Stock News")
     if news_list:
         for article in news_list:
-            title = article.get('title', 'News Update')
-            publisher = article.get('publisher', 'Market News')
-            st.markdown(f'<div class="news-box"><b>{publisher}:</b> {title}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="news-box"><b>{article["publisher"]}:</b> {article["title"]}</div>', unsafe_allow_html=True)
+    else:
+        st.write("പുതിയ വാർത്തകൾ ലഭ്യമായിട്ടില്ല.")
 
-    # Voice Input & Dynamic Reasoning Engine
+    # 4. Voice Input & Dynamic Gemini Reasoning Engine
     st.markdown("---")
     st.subheader("🎙️ Dynamic Voice Chat with Shadow AI")
     spoken_text = speech_to_text(language='ml-IN', start_prompt="🎙️ Click & Speak (ചോദിക്കാം)", stop_prompt="⏹️ Stop", key='voice_input')
@@ -116,12 +128,12 @@ if not df.empty and metrics:
 
         if api_key:
             news_titles = [n.get('title', '') for n in news_list]
-            news_context = ". ".join(news_titles) if news_titles else "No specific news updates today."
+            news_context = ". ".join(news_titles) if news_titles else "No major news updates today."
 
             agent_prompt = f"""
-            You are Shadow AI, a professional real-time stock market research agent.
+            You are Shadow AI, an expert real-time Indian stock market research agent.
             
-            REAL-TIME DATA CONTEXT FOR {selected_stock}:
+            REAL-TIME MARKET CONTEXT FOR {selected_stock}:
             - Current Price: ₹{metrics['latest_close']}
             - Key Support Level: ₹{metrics['support']}
             - Key Resistance Level: ₹{metrics['resistance']}
@@ -132,10 +144,9 @@ if not df.empty and metrics:
             USER QUERY: "{user_query}"
 
             INSTRUCTIONS:
-            1. Act as a real financial analyst agent.
-            2. Answer the user's query dynamically using the live context provided above.
-            3. Respond in natural, conversational Malayalam language.
-            4. Keep the explanation clear, actionable, and accurate to the data.
+            1. Analyze the live data context and answer the user's question directly.
+            2. Respond in clear, natural, conversational Malayalam language.
+            3. Provide actionable trade insights, level references, and clear reasoning.
             """
 
             try:
@@ -143,11 +154,12 @@ if not df.empty and metrics:
                 response = model.generate_content(agent_prompt)
                 response_ml = response.text
             except Exception as e:
-                response_ml = f"AI Error: {str(e)}"
+                response_ml = f"AI ലഭിക്കുന്നതിൽ തടസ്സം നേരിട്ടു: {str(e)}"
         else:
             response_ml = "ദയവായി ഒരു Gemini API Key ക്രമീകരിക്കുക."
 
         st.markdown(f'<div class="chat-box"><b>🤖 ഷാഡോ:</b><p>{response_ml}</p></div>', unsafe_allow_html=True)
+        
         try:
             st.components.v1.html(generate_malayalam_audio(response_ml), height=60)
         except Exception:
