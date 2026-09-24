@@ -2,6 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import datetime
+import sqlite3
+import time
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -15,358 +17,171 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Dark institutional styling
 st.markdown("""
 <style>
-[data-testid="collapsedControl"], section[data-testid="stSidebar"] {
-    display: none;
-}
-.stApp {
-    background-color: #0e1117;
-    color: #ffffff;
-}
-.status-card {
-    background-color: #1e222d;
-    padding: 16px;
-    border-radius: 10px;
-    border: 1px solid #2962ff;
-    margin-bottom: 20px;
-}
-.signal-card {
-    background-color: #1e222d;
-    padding: 18px;
-    border-radius: 12px;
-    border: 2px solid #00e676;
-    margin-bottom: 15px;
-}
-.warning-card {
-    background-color: #2a1f1d;
-    padding: 15px;
-    border-radius: 8px;
-    border-left: 4px solid #ff5252;
-    margin-bottom: 15px;
-}
+    [data-testid="collapsedControl"], section[data-testid="stSidebar"] { display: none; }
+    .stApp { background-color: #0e1117; color: #ffffff; }
+    .status-card {
+        background-color: #1e222d;
+        padding: 16px;
+        border-radius: 10px;
+        border: 1px solid #2962ff;
+        margin-bottom: 20px;
+    }
+    .metric-value { font-size: 24px; font-weight: bold; color: #00e676; }
+    .metric-label { font-size: 14px; color: #b2b5be; }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# 2. CORE WATCHLIST & DATA FETCHERS
+# 2. PERSISTENT DATABASE ENGINE (SQLite)
 # -------------------------------------------------------------------
-WATCHLIST = [
-    "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
-    "SBIN.NS", "TATAMOTORS.NS", "AXISBANK.NS", "BHARTIARTL.NS", "LTIM.NS"
-]
-
-@st.cache_data(ttl=300)
-def fetch_fii_dii_sentiment():
-    """Fetch/Estimate Institutional FII & DII Market Sentiment."""
-    return {
-        "fii_net": "🟢 +1,420 Cr (Net Buyer)",
-        "dii_net": "🟢 +850 Cr (Net Buyer)",
-        "market_bias": "BULLISH 📈",
-        "institutional_concept": "Smart Money Accumulation Phase"
-    }
-
-def analyze_900_am_market():
-    """9:00 AM Engine: Automatically scans universe & selects Top 10 stocks."""
-    results = []
-    for ticker in WATCHLIST:
-        try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(period="2d", interval="5m")
-            if not df.empty:
-                last_price = float(df['Close'].iloc[-1])
-                prev_close = float(df['Close'].iloc[0])
-                p_change = ((last_price - prev_close) / prev_close) * 100
-                vol = int(df['Volume'].sum())
-                action = "BUY 🟢" if p_change >= 0 else "SELL 🔴"
-                concept = "High Delta Imbalance" if abs(p_change) > 0.5 else "Liquidity Sweep Setup"
-                results.append({
-                    "Stock": ticker.replace(".NS", ""),
-                    "LTP (₹)": round(last_price, 2),
-                    "Change (%)": round(p_change, 2),
-                    "Volume": vol,
-                    "Action Bias": action,
-                    "SMC Concept": concept
-                })
-        except Exception:
-            continue
-    df_res = pd.DataFrame(results)
-    if not df_res.empty:
-        return df_res.sort_values(by="Change (%)", ascending=False).reset_index(drop=True)
-    return pd.DataFrame()
-
-def analyze_915_am_order_flow(top_10_df):
-    """9:15 AM Engine: Analyzes candle order flow, selects Top 3 & precise entry setups."""
-    if top_10_df.empty:
-        return []
-    
-    top_picks = top_10_df.head(3).to_dict(orient="records")
-    trade_setups = []
-    
-    for stock in top_picks:
-        symbol = stock["Stock"] + ".NS"
-        data = yf.Ticker(symbol).history(period="1d", interval="1m")
-        if not data.empty and len(data) >= 5:
-            current_close = float(data['Close'].iloc[-1])
-            vwap = float((data['Close'] * data['Volume']).sum() / data['Volume'].sum())
-            high_5m = float(data['High'].iloc[:5].max())
-            low_5m = float(data['Low'].iloc[:5].min())
-            
-            if stock["Action Bias"] == "BUY 🟢":
-                entry = round(high_5m + 0.50, 2)
-                sl = round(low_5m - 0.50, 2)
-                target = round(entry + ((entry - sl) * 2), 2)
-                order_flow = "Strong Buying Delta (Ask Absorption)"
-            else:
-                entry = round(low_5m - 0.50, 2)
-                sl = round(high_5m + 0.50, 2)
-                target = round(entry - ((sl - entry) * 2), 2)
-                order_flow = "Strong Selling Delta (Bid Aggression)"
-                
-            trade_setups.append({
-                "Stock": stock["Stock"],
-                "Action": stock["Action Bias"],
-                "LTP": current_close,
-                "VWAP": round(vwap, 2),
-                "Entry": entry,
-                "StopLoss": sl,
-                "Target": target,
-                "RiskReward": "1:2.0",
-                "OrderFlow": order_flow
-            })
-    return trade_setups
-
-def calculate_live_probability_and_completion(df, setup):
-    """Calculates live target probability, completion %, buyers/sellers strength, and market status."""
-    if df.empty or len(df) < 2:
-        return 50.0, 0.0, "50% / 50%", "WAITING FOR ENTRY"
-    
-    current_price = float(df['Close'].iloc[-1])
-    entry = setup['Entry']
-    target = setup['Target']
-    sl = setup['StopLoss']
-    is_buy = "BUY" in setup['Action']
-    
-    # Calculate Target Completion %
-    total_distance = abs(target - entry) if abs(target - entry) > 0 else 1.0
-    if is_buy:
-        current_progress = current_price - entry
-    else:
-        current_progress = entry - current_price
-        
-    completion_pct = max(0.0, min(100.0, (current_progress / total_distance) * 100))
-    
-    # Estimate Buyer / Seller Strength ratio using last 5 candles delta
-    recent_df = df.tail(10)
-    up_vol = recent_df[recent_df['Close'] >= recent_df['Open']]['Volume'].sum()
-    down_vol = recent_df[recent_df['Close'] < recent_df['Open']]['Volume'].sum()
-    total_vol = up_vol + down_vol if (up_vol + down_vol) > 0 else 1
-    
-    buyer_pct = int((up_vol / total_vol) * 100)
-    seller_pct = 100 - buyer_pct
-    strength_str = f"🟢 Buyers {buyer_pct}% | 🔴 Sellers {seller_pct}%"
-    
-    # Calculate Live Probability based on VWAP, Momentum, & Strength
-    vwap = float((df['Close'] * df['Volume']).sum() / df['Volume'].sum())
-    base_prob = 50.0
-    
-    if is_buy:
-        if current_price > vwap: base_prob += 15
-        if buyer_pct > 60: base_prob += 20
-        if current_price >= entry: base_prob += 10
-    else:
-        if current_price < vwap: base_prob += 15
-        if seller_pct > 60: base_prob += 20
-        if current_price <= entry: base_prob += 10
-        
-    prob = max(5.0, min(98.0, base_prob))
-    
-    # Determine Live State / Status
-    if is_buy:
-        if current_price >= target:
-            status = "🎯 TARGET HIT! EXIT NOW"
-        elif current_price <= sl:
-            status = "🛑 STOP LOSS HIT! EXIT NOW"
-        elif current_price >= entry:
-            status = "⚡ BUY ZONE ENTERED - STABLE"
-        else:
-            status = "⏳ APPROACHING BUY ENTRY ZONE"
-    else:
-        if current_price <= target:
-            status = "🎯 TARGET HIT! EXIT NOW"
-        elif current_price >= sl:
-            status = "🛑 STOP LOSS HIT! EXIT NOW"
-        elif current_price <= entry:
-            status = "⚡ SELL ZONE ENTERED - STABLE"
-        else:
-            status = "⏳ APPROACHING SELL ENTRY ZONE"
-            
-    return round(prob, 1), round(completion_pct, 1), strength_str, status
-
-# -------------------------------------------------------------------
-# 3. HEADER & AUTOMATION SWITCH
-# -------------------------------------------------------------------
-st.title("🐱 Shadow Autonomous AI Trading Agent")
-st.caption("Institutional Order Flow, Pre-Market Screener & Market Execution Engine")
-
-col_time, col_switch = st.columns([3, 2])
-with col_switch:
-    manual_switch = st.toggle("⚡ Autonomous Engine / Manual Switch", value=True)
-    if manual_switch:
-        st.success("🤖 AUTOMATION ACTIVE: Dynamic Auto-Updates Enabled")
-    else:
-        st.error("🛑 MANUAL OVERRIDE ACTIVATED: Auto-Execution Paused")
-
-current_time = datetime.datetime.now().strftime("%I:%M:%S %p")
-with col_time:
-    st.markdown(f'<div class="status-card"><b>🕒 System Time:</b> {current_time}<br><b>Strategy State:</b> Professional Scalper & Order Flow Engine</div>', unsafe_allow_html=True)
-
-# -------------------------------------------------------------------
-# 4. 9:00 AM STAGE: PRE-MARKET, INSTITUTIONAL FLOW & TOP 10 SCAN
-# -------------------------------------------------------------------
-st.subheader("🌅 9:00 AM Market Open — Institutional Flow & Top 10 Discovery")
-inst_data = fetch_fii_dii_sentiment()
-c1, c2, c3 = st.columns(3)
-c1.metric("FII Activity", inst_data["fii_net"])
-c2.metric("DII Activity", inst_data["dii_net"])
-c3.metric("Institutional Bias", inst_data["market_bias"])
-
-st.markdown("---")
-top_10_df = analyze_900_am_market()
-if not top_10_df.empty:
-    st.markdown("### 📊 Automated Top 10 Stocks Selection")
-    st.dataframe(top_10_df, use_container_width=True)
-else:
-    st.info("Fetching Pre-Market / Market Opening Data...")
-
-# -------------------------------------------------------------------
-# 5. 9:15 AM STAGE: TOP 3 SELECTION & ORDER FLOW CANDLE TRIGGER
-# -------------------------------------------------------------------
-st.markdown("---")
-st.subheader("⚡ 9:15 AM Order Flow Analysis — Top 3 Trade Setups")
-
-if manual_switch:
-    setups = analyze_915_am_order_flow(top_10_df)
-    if setups:
-        cols = st.columns(len(setups))
-        for idx, setup in enumerate(setups):
-            with cols[idx]:
-                st.markdown(f"""
-                <div class="signal-card">
-                    <h3>{setup['Stock']} ({setup['Action']})</h3>
-                    <p><b>Order Flow Delta:</b> {setup['OrderFlow']}</p>
-                    <p><b>VWAP Level:</b> ₹{setup['VWAP']}</p>
-                    <hr>
-                    <p><b>📍 Entry Zone:</b> ₹{setup['Entry']}</p>
-                    <p><b>🎯 Target Option:</b> ₹{setup['Target']}</p>
-                    <p><b>🛑 Stop Loss:</b> ₹{setup['StopLoss']}</p>
-                    <p><b>R:R Expectancy:</b> {setup['RiskReward']}</p>
-                </div>
-                """, unsafe_allow_html=True)
-
-        # -------------------------------------------------------------------
-        # 6. DYNAMIC 1M CHART & REAL-TIME PROBABILITY/EXECUTION ANALYZER
-        # -------------------------------------------------------------------
-        st.markdown("---")
-        st.subheader("📈 Interactive 1m Execution Chart & Live Target Engine")
-        
-        # Interactive Stock Selection
-        stock_list = [s['Stock'] for s in setups]
-        selected_stock_name = st.radio(
-            "👉 **Select Stock to view dynamic chart & live buy/sell trigger zones:**", 
-            stock_list, 
-            horizontal=True
+def init_db():
+    conn = sqlite3.connect("shadow_trading.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS account_state (
+            id INTEGER PRIMARY KEY,
+            capital REAL,
+            target REAL,
+            initial_capital REAL
         )
-        
-        selected_setup = next(s for s in setups if s['Stock'] == selected_stock_name)
-        ticker_symbol = selected_setup['Stock'] + ".NS"
-        
-        # Fetch 1-minute live data
-        chart_df = yf.Ticker(ticker_symbol).history(period="1d", interval="1m")
-        
-        if not chart_df.empty:
-            chart_df['VWAP'] = (chart_df['Close'] * chart_df['Volume']).cumsum() / chart_df['Volume'].cumsum()
-            
-            # Calculate dynamic metrics
-            prob, comp_pct, strength_str, live_status = calculate_live_probability_and_completion(chart_df, selected_setup)
-            
-            # Metric Dashboard Display
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("🎯 Target Completion", f"{comp_pct}%", delta=f"{live_status}")
-            m2.metric("🎲 Target Hit Probability", f"{prob}%")
-            m3.metric("📊 Order Flow Strength", strength_str)
-            m4.metric("📍 Execution Zone Status", live_status)
-            
-            # Dynamic Completion Progress Bar
-            st.write(f"**Target Progression:**")
-            st.progress(min(int(comp_pct), 100))
-            
-            # Build Plotly Dynamic Chart with Buy/Sell Entry Zones
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
-            
-            # Candlestick
-            fig.add_trace(go.Candlestick(
-                x=chart_df.index,
-                open=chart_df['Open'],
-                high=chart_df['High'],
-                low=chart_df['Low'],
-                close=chart_df['Close'],
-                name='1m Price'
-            ), row=1, col=1)
-            
-            # VWAP Line
-            fig.add_trace(go.Scatter(
-                x=chart_df.index, y=chart_df['VWAP'], 
-                line=dict(color='orange', width=1.5), name='VWAP'
-            ), row=1, col=1)
-            
-            # Entry, Target, and Stop Loss Horizontal Zone Lines
-            fig.add_hline(y=selected_setup['Entry'], line_dash="dash", line_color="cyan", annotation_text=f"ENTRY: ₹{selected_setup['Entry']}", row=1, col=1)
-            fig.add_hline(y=selected_setup['Target'], line_dash="solid", line_color="green", annotation_text=f"TARGET: ₹{selected_setup['Target']}", row=1, col=1)
-            fig.add_hline(y=selected_setup['StopLoss'], line_dash="dot", line_color="red", annotation_text=f"STOP LOSS: ₹{selected_setup['StopLoss']}", row=1, col=1)
-            
-            # Highlight Buy/Sell Entry Zone Band
-            fig.add_hrect(
-                y0=min(selected_setup['Entry'], selected_setup['StopLoss']), 
-                y1=max(selected_setup['Entry'], selected_setup['Target']),
-                fillcolor="green" if "BUY" in selected_setup['Action'] else "red", 
-                opacity=0.05, line_width=0, row=1, col=1
-            )
-            
-            # Volume Bar Chart
-            fig.add_trace(go.Bar(
-                x=chart_df.index, y=chart_df['Volume'], 
-                marker_color='lightblue', name='Volume'
-            ), row=2, col=1)
-            
-            fig.update_layout(
-                title=f"{selected_setup['Stock']} Live 1-Minute Dynamic Execution Chart",
-                template="plotly_dark",
-                xaxis_rangeslider_visible=False,
-                height=550
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("Fetching live 1-minute streaming data for chart visualization...")
-    else:
-        st.info("Awaiting 9:15 AM Market Opening candle calculations...")
-else:
-    st.warning("⚠️ **Manual Switch Enabled**: Dynamic auto-signals are paused due to manual override.")
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS trade_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            symbol TEXT,
+            action TEXT,
+            price REAL,
+            quantity REAL,
+            pnl REAL
+        )
+    ''')
+    cursor.execute("SELECT COUNT(*) FROM account_state")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO account_state (id, capital, target, initial_capital) VALUES (1, 1222.0, 100000.0, 1222.0)")
+    conn.commit()
+    conn.close()
+
+def get_state():
+    conn = sqlite3.connect("shadow_trading.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT capital, target, initial_capital FROM account_state WHERE id = 1")
+    capital, target, initial_capital = cursor.fetchone()
+    conn.close()
+    return capital, target, initial_capital
+
+def update_capital(new_capital):
+    conn = sqlite3.connect("shadow_trading.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE account_state SET capital = ? WHERE id = 1", (new_capital,))
+    conn.commit()
+    conn.close()
+
+def log_trade(symbol, action, price, quantity, pnl):
+    conn = sqlite3.connect("shadow_trading.db")
+    cursor = conn.cursor()
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        INSERT INTO trade_history (timestamp, symbol, action, price, quantity, pnl)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (timestamp, symbol, action, price, quantity, pnl))
+    conn.commit()
+    conn.close()
+
+def get_trade_logs():
+    conn = sqlite3.connect("shadow_trading.db")
+    df = pd.read_sql_query("SELECT * FROM trade_history ORDER BY id DESC", conn)
+    conn.close()
+    return df
+
+# Initialize DB state
+init_db()
 
 # -------------------------------------------------------------------
-# 7. MANUAL SWITCH CRITERIA & EMERGENCY RULES
+# 3. HEADER & CORE DASHBOARD METRICS
 # -------------------------------------------------------------------
-st.markdown("---")
-st.subheader("🛑 9:15 AM Manual Switch Guidance")
-st.markdown("""
-<div class="warning-card">
-<b>When to toggle OFF the manual switch and take manual control:</b>
-<ul>
-<li><b>Heavy Opening Gap:</b> If top picks gap up/down by > 2% away from the 9:00 AM reference price.</li>
-<li><b>Macro News Events:</b> Unscheduled economic news, RBI policy announcements, or geopolitical alerts.</li>
-<li><b>Immediate VWAP Breakdown:</b> If the 1-minute candle closes aggressively on the opposite side of VWAP within the first 3 minutes.</li>
-</ul>
-</div>
-""", unsafe_allow_html=True)
+capital, target, initial_capital = get_state()
+total_profit = capital - initial_capital
+progress = min(max((capital - initial_capital) / (target - initial_capital), 0.0), 1.0)
+
+st.title("Shadow AI Trading Agent 🐱 (1x Spot / No Leverage)")
+
+st.markdown('<div class="status-card">', unsafe_allow_html=True)
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.markdown('<div class="metric-label">Current Capital</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-value">₹{capital:,.2f}</div>', unsafe_allow_html=True)
+with col2:
+    st.markdown('<div class="metric-label">Target Capital</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-value">₹{target:,.2f}</div>', unsafe_allow_html=True)
+with col3:
+    st.markdown('<div class="metric-label">Total Realized Profit</div>', unsafe_allow_html=True)
+    pnl_color = "#00e676" if total_profit >= 0 else "#ff5252"
+    st.markdown(f'<div class="metric-value" style="color:{pnl_color}">₹{total_profit:,.2f}</div>', unsafe_allow_html=True)
+with col4:
+    st.markdown('<div class="metric-label">Progress to Target</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-value">{progress * 100:.2f}%</div>', unsafe_allow_html=True)
+
+st.progress(progress)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# -------------------------------------------------------------------
+# 4. MARKET DATA & PAPER TRADING EXECUTION
+# -------------------------------------------------------------------
+symbol = st.selectbox("Select Asset for Trading", ["RELIANCE.NS", "TCS.NS", "INFY.NS", "BTC-USD"], index=0)
+
+data = yf.download(symbol, period="1d", interval="1m")
+
+if not data.empty:
+    latest_price = float(data['Close'].iloc[-1].item())
+    
+    col_left, col_right = st.columns([2, 1])
+    
+    with col_left:
+        st.subheader(f"Live Price Chart - {symbol}")
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=data.index,
+            open=data['Open'], high=data['High'],
+            low=data['Low'], close=data['Close'],
+            name=symbol
+        ))
+        fig.update_layout(template="plotly_dark", height=400, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+        
+    with col_right:
+        st.subheader("Paper Trade Controls")
+        st.write(f"**Current Price:** ₹{latest_price:,.2f}")
+        
+        trade_amount = st.number_input("Capital Allocation (₹)", min_value=100.0, max_value=float(capital), value=float(capital))
+        
+        col_buy, col_sell = st.columns(2)
+        
+        # Spot buy simulation (1x leverage)
+        if col_buy.button("Simulate Buy (1x Spot)", use_container_width=True):
+            qty = trade_amount / latest_price
+            log_trade(symbol, "BUY", latest_price, qty, 0.0)
+            st.success(f"Bought {qty:.4f} units of {symbol} at ₹{latest_price:,.2f}")
+            
+        # Profit / Loss Realization Simulation
+        if col_sell.button("Simulate Take Profit (+2%)", use_container_width=True):
+            pnl = trade_amount * 0.02
+            new_balance = capital + pnl
+            update_capital(new_balance)
+            qty = trade_amount / latest_price
+            log_trade(symbol, "SELL (TP)", latest_price * 1.02, qty, pnl)
+            st.success(f"Profit of ₹{pnl:.2f} saved to system!")
+            st.rerun()
+
+# -------------------------------------------------------------------
+# 5. SAVED TRADE RECORDS & AUDIT LOGS
+# -------------------------------------------------------------------
+st.subheader("Persistent Trade History Log")
+trade_df = get_trade_logs()
+
+if not trade_df.empty:
+    st.dataframe(trade_df, use_container_width=True)
+else:
+    st.info("No recorded trades yet. Executed paper trades will be stored here automatically across restarts.")
