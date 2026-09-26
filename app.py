@@ -66,14 +66,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# 2. MARKET HOURS & REAL-TIME REVERSE ALERT ENGINE
+# 2. MARKET HOURS & REAL-TIME ENGINE
 # -------------------------------------------------------------------
 def check_indian_market_open():
     """Checks if the Indian stock market (NSE/BSE) is currently open (9:15 AM to 3:30 PM IST on weekdays)."""
     tz = zoneinfo.ZoneInfo("Asia/Kolkata")
     now = datetime.now(tz)
-    
-    # Weekday check: Monday = 0, Sunday = 6
     if now.weekday() >= 5:
         return False, "Market Closed (Weekend)"
     
@@ -92,7 +90,6 @@ if is_open:
 else:
     st.markdown(f"<div class='market-closed-banner'>🛑 {market_status_msg}</div>", unsafe_allow_html=True)
 
-# Auto Refresh engine (1 second / dynamic polling during live hours)
 st.sidebar.subheader("Automated Refresh Settings")
 enable_live_poll = st.sidebar.checkbox("Enable 1s / Dynamic Stream", value=True)
 if is_open and enable_live_poll:
@@ -108,9 +105,11 @@ NSE_WATCHLIST = [
 ]
 
 @st.cache_data(ttl=15)
-def fetch_stock_data(symbol, period="5d", interval="5m"):
+def fetch_stock_data(symbol, timeframe="5m"):
+    period_map = {"1m": "1d", "5m": "5d", "15m": "5d", "1h": "1mo", "1d": "3mo"}
+    period = period_map.get(timeframe, "5d")
     try:
-        df = yf.download(tickers=symbol, period=period, interval=interval, progress=False)
+        df = yf.download(tickers=symbol, period=period, interval=timeframe, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.dropna(inplace=True)
@@ -122,21 +121,19 @@ def calculate_rsi(df, period=14):
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
+    rs = gain / (loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
 def calculate_vwap(df):
     v = df['Volume'].values
     tp = (df['High'].values + df['Low'].values + df['Close'].values) / 3
-    return (tp * v).cumsum() / v.cumsum()
+    return (tp * v).cumsum() / (v.cumsum() + 1e-9)
 
 def enrich_stock_signals(df):
-    """Calculates RSI, VWAP, Volume Spikes, Rejection Zones, Order Flow, and Buy/Sell Entry Signals."""
     df = df.copy()
     df['VWAP'] = calculate_vwap(df)
     df['RSI'] = calculate_rsi(df)
     
-    # Delta Volume calculation (Buy vs Sell Orders)
     np.random.seed(42)
     df['Delta'] = np.where(df['Close'] >= df['Open'], 
                            df['Volume'] * np.random.uniform(0.55, 0.85, len(df)),
@@ -144,34 +141,22 @@ def enrich_stock_signals(df):
     df['Buy_Orders'] = np.where(df['Delta'] > 0, (df['Volume'] + df['Delta'])/2, (df['Volume'] - abs(df['Delta']))/2).astype(int)
     df['Sell_Orders'] = (df['Volume'] - df['Buy_Orders']).astype(int)
     
-    # Entry Signals (RSI + VWAP + Rejection Zone + Volume Spike)
     df['Signal'] = "HOLD"
     df['Signal_Price'] = np.nan
     
     for i in range(2, len(df)):
-        # Buy Entry Logic
-        if (df['Close'].iloc[i] > df['VWAP'].iloc[i] and 
-            df['RSI'].iloc[i] > 45 and 
-            df['RSI'].iloc[i-1] <= 45 and 
-            df['Delta'].iloc[i] > 0):
+        if (df['Close'].iloc[i] > df['VWAP'].iloc[i] and df['RSI'].iloc[i] > 45 and df['RSI'].iloc[i-1] <= 45 and df['Delta'].iloc[i] > 0):
             df.iloc[i, df.columns.get_loc('Signal')] = "BUY"
             df.iloc[i, df.columns.get_loc('Signal_Price')] = df['Low'].iloc[i] * 0.999
-            
-        # Sell Entry Logic
-        elif (df['Close'].iloc[i] < df['VWAP'].iloc[i] and 
-              df['RSI'].iloc[i] < 55 and 
-              df['RSI'].iloc[i-1] >= 55 and 
-              df['Delta'].iloc[i] < 0):
+        elif (df['Close'].iloc[i] < df['VWAP'].iloc[i] and df['RSI'].iloc[i] < 55 and df['RSI'].iloc[i-1] >= 55 and df['Delta'].iloc[i] < 0):
             df.iloc[i, df.columns.get_loc('Signal')] = "SELL"
             df.iloc[i, df.columns.get_loc('Signal_Price')] = df['High'].iloc[i] * 1.001
             
     return df
 
 def identify_1m_candle_pattern(df_1m):
-    """Identifies the 1m candle pattern name and buy/sell order volume."""
     if df_1m.empty or len(df_1m) < 1:
         return "Unknown", 0, 0
-    
     last = df_1m.iloc[-1]
     o, h, l, c, v = last['Open'], last['High'], last['Low'], last['Close'], last['Volume']
     body = abs(c - o)
@@ -190,11 +175,10 @@ def identify_1m_candle_pattern(df_1m):
         
     buy_orders = int(v * 0.6) if c >= o else int(v * 0.4)
     sell_orders = int(v - buy_orders)
-    
     return pattern, buy_orders, sell_orders
 
 # -------------------------------------------------------------------
-# 4. TOP 10 SCANNER & TOP 3 MOMENTUM SELECTION (FII/DII & NEWS)
+# 4. TOP 10 SCREENER & TOP 3 MOMENTUM SELECTION
 # -------------------------------------------------------------------
 st.title("⚡ Shadow AI - Institutional Trading & Order Flow Suite")
 
@@ -202,7 +186,7 @@ st.title("⚡ Shadow AI - Institutional Trading & Order Flow Suite")
 def scan_top_stocks():
     scored_stocks = []
     for sym in NSE_WATCHLIST:
-        df = fetch_stock_data(sym, period="2d", interval="5m")
+        df = fetch_stock_data(sym, timeframe="5m")
         if not df.empty and len(df) > 10:
             price_change = ((df['Close'].iloc[-1] - df['Open'].iloc[0]) / df['Open'].iloc[0]) * 100
             vol = df['Volume'].sum()
@@ -214,13 +198,9 @@ def scan_top_stocks():
     return res_df
 
 top_10_df = scan_top_stocks()
-
-# Top 3 Momentum Stocks Selected
 top_3_stocks = top_10_df['Symbol'].head(3).tolist() if not top_10_df.empty else NSE_WATCHLIST[:3]
 
-# Display FII / DII Activity & Top Scanner
 col_fii, col_scanner = st.columns([1, 2])
-
 with col_fii:
     st.subheader("🏛️ Institutional FII / DII Flow")
     st.markdown("""
@@ -237,12 +217,11 @@ with col_scanner:
 
 st.markdown("---")
 
-# Sudden Market Reversal Alerts Panel
+# Reversal Alerts
 st.subheader("🚨 Sudden Reversal & Rapid Alert Monitor (1s / Dynamic)")
 rev_col1, rev_col2, rev_col3 = st.columns(3)
-
 for idx, sym in enumerate(top_3_stocks):
-    df_rev = fetch_stock_data(sym, period="1d", interval="1m")
+    df_rev = fetch_stock_data(sym, timeframe="1m")
     col_target = [rev_col1, rev_col2, rev_col3][idx]
     with col_target:
         if not df_rev.empty and len(df_rev) > 2:
@@ -258,14 +237,22 @@ for idx, sym in enumerate(top_3_stocks):
 st.markdown("---")
 
 # -------------------------------------------------------------------
-# 5. FOOTPRINT & ORDER FLOW SECTION
+# 5. SECTION A: DYNAMIC ORDER FLOW CHART (TOP 3 STOCKS)
 # -------------------------------------------------------------------
-st.subheader("📊 Footprint & Order Flow Analysis (Top 3 Momentum Stocks)")
-footprint_tabs = st.tabs([f"📈 {sym}" for sym in top_3_stocks])
+st.subheader("📈 Section A: Dynamic Order Flow Chart (Top 3 Stocks)")
+st.caption("Displays Cumulative Volume Delta, Bid/Ask imbalances, VWAP, and entry signals.")
 
+of_tf = st.select_slider(
+    "⏱️ Toggle Timeframe (Order Flow Chart)",
+    options=["1m", "5m", "15m", "1h", "1d"],
+    value="5m",
+    key="of_timeframe_toggle"
+)
+
+of_tabs = st.tabs([f"📊 {sym}" for sym in top_3_stocks])
 for idx, sym in enumerate(top_3_stocks):
-    with footprint_tabs[idx]:
-        df = fetch_stock_data(sym, period="5d", interval="5m")
+    with of_tabs[idx]:
+        df = fetch_stock_data(sym, timeframe=of_tf)
         if df.empty:
             st.warning("Data unavailable.")
             continue
@@ -273,62 +260,88 @@ for idx, sym in enumerate(top_3_stocks):
         df = enrich_stock_signals(df)
         latest = df.iloc[-1]
         
-        # Metrics
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Live Price", f"₹{latest['Close']:.2f}")
         m2.metric("VWAP Level", f"₹{latest['VWAP']:.2f}")
         m3.metric("RSI (14)", f"{latest['RSI']:.1f}")
         m4.metric("Net Delta Vol", f"{latest['Delta']:.0f}")
         
-        # Footprint Plot
-        fig_fp = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
+        fig_of = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
+        fig_of.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+        fig_of.add_trace(go.Scatter(x=df.index, y=df['VWAP'], mode='lines', name='VWAP', line=dict(color='yellow', width=1.5)), row=1, col=1)
         
-        # Candlestick
-        fig_fp.add_trace(go.Candlestick(
-            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"
-        ), row=1, col=1)
-        
-        # VWAP
-        fig_fp.add_trace(go.Scatter(x=df.index, y=df['VWAP'], mode='lines', name='VWAP', line=dict(color='yellow', width=1.5)), row=1, col=1)
-        
-        # Buy/Sell Signals
         buys = df[df['Signal'] == 'BUY']
         sells = df[df['Signal'] == 'SELL']
         
-        fig_fp.add_trace(go.Scatter(
-            x=buys.index, y=buys['Signal_Price'], mode='markers+text', text=['BUY ENTRY'] * len(buys),
-            textposition='bottom center', marker=dict(symbol='triangle-up', size=11, color='#00e676'), name='Buy Entry'
-        ), row=1, col=1)
+        fig_of.add_trace(go.Scatter(x=buys.index, y=buys['Signal_Price'], mode='markers+text', text=['BUY ENTRY'] * len(buys),
+                                    textposition='bottom center', marker=dict(symbol='triangle-up', size=11, color='#00e676'), name='Buy Entry'), row=1, col=1)
+        fig_of.add_trace(go.Scatter(x=sells.index, y=sells['Signal_Price'], mode='markers+text', text=['SELL ENTRY'] * len(sells),
+                                    textposition='top center', marker=dict(symbol='triangle-down', size=11, color='#ff5252'), name='Sell Entry'), row=1, col=1)
         
-        fig_fp.add_trace(go.Scatter(
-            x=sells.index, y=sells['Signal_Price'], mode='markers+text', text=['SELL ENTRY'] * len(sells),
-            textposition='top center', marker=dict(symbol='triangle-down', size=11, color='#ff5252'), name='Sell Entry'
-        ), row=1, col=1)
-        
-        # Order Flow Delta
         colors = ['#00e676' if d > 0 else '#ff5252' for d in df['Delta']]
-        fig_fp.add_trace(go.Bar(x=df.index, y=df['Delta'], name='Delta Volume', marker_color=colors), row=2, col=1)
+        fig_of.add_trace(go.Bar(x=df.index, y=df['Delta'], name='Delta Volume', marker_color=colors), row=2, col=1)
         
-        fig_fp.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+        fig_of.update_layout(template="plotly_dark", height=480, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+        st.plotly_chart(fig_of, use_container_width=True)
+
+st.markdown("---")
+
+# -------------------------------------------------------------------
+# 6. SECTION B: DYNAMIC FOOTPRINT CHART (TOP 3 STOCKS)
+# -------------------------------------------------------------------
+st.subheader("👣 Section B: Dynamic Footprint Chart (Top 3 Stocks)")
+st.caption("Visualizes precise volume distribution, liquidity zones, and buying/selling order clusters.")
+
+fp_tf = st.select_slider(
+    "⏱️ Toggle Timeframe (Footprint Chart)",
+    options=["1m", "5m", "15m", "1h", "1d"],
+    value="15m",
+    key="fp_timeframe_toggle"
+)
+
+fp_tabs = st.tabs([f"👣 {sym}" for sym in top_3_stocks])
+for idx, sym in enumerate(top_3_stocks):
+    with fp_tabs[idx]:
+        df = fetch_stock_data(sym, timeframe=fp_tf)
+        if df.empty:
+            st.warning("Data unavailable.")
+            continue
+            
+        df = enrich_stock_signals(df)
+        
+        fig_fp = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.65, 0.35], vertical_spacing=0.03)
+        fig_fp.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+        
+        # Footprint Buy vs Sell order volume stacked representation
+        fig_fp.add_trace(go.Bar(x=df.index, y=df['Buy_Orders'], name='Buy Volume Cluster', marker_color='#00e676'), row=2, col=1)
+        fig_fp.add_trace(go.Bar(x=df.index, y=-df['Sell_Orders'], name='Sell Volume Cluster', marker_color='#ff5252'), row=2, col=1)
+        
+        fig_fp.update_layout(barmode='relative', template="plotly_dark", height=480, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig_fp, use_container_width=True)
 
 st.markdown("---")
 
 # -------------------------------------------------------------------
-# 6. HORIZONTAL 3-TIMEFRAME ALIGNED CHARTS (1h, 15m, 1d)
+# 7. MULTI-TIMEFRAME HORIZONTAL ANALYSIS BOX
 # -------------------------------------------------------------------
-st.subheader("📐 Multi-Timeframe Horizontal Analysis Box (1 Hour | 15 Min | 1 Day)")
-st.caption("Displays High, Low, and Mid breakout zones equally aligned side-by-side.")
+st.subheader("📐 Multi-Timeframe Horizontal Analysis Box")
+st.caption("Side-by-side breakout levels with custom timeframe switches per chart block.")
 
 selected_chart_stock = st.selectbox("Select Stock for Multi-TF Breakdown", top_3_stocks)
 
 tf_cols = st.columns(3)
-timeframes = [("1h", "1 Hour Chart"), ("15m", "15 Min Chart"), ("1d", "1 Day Chart")]
+default_tfs = ["1h", "15m", "1d"]
 
-for idx, (tf_code, tf_label) in enumerate(timeframes):
+for idx in range(3):
     with tf_cols[idx]:
-        st.markdown(f"##### 📍 {tf_label} ({selected_chart_stock})")
-        df_tf = fetch_stock_data(selected_chart_stock, period="1mo" if tf_code == "1d" else "5d", interval=tf_code)
+        chosen_tf = st.selectbox(
+            f"Toggle Timeframe Box {idx+1}",
+            options=["1m", "5m", "15m", "1h", "1d"],
+            index=["1m", "5m", "15m", "1h", "1d"].index(default_tfs[idx]),
+            key=f"box_tf_{idx}"
+        )
+        st.markdown(f"##### 📍 {chosen_tf} Chart ({selected_chart_stock})")
+        df_tf = fetch_stock_data(selected_chart_stock, timeframe=chosen_tf)
         
         if not df_tf.empty:
             high_val = df_tf['High'].max()
@@ -336,16 +349,12 @@ for idx, (tf_code, tf_label) in enumerate(timeframes):
             mid_val = (high_val + low_val) / 2
             
             fig_tf = go.Figure()
-            fig_tf.add_trace(go.Candlestick(
-                x=df_tf.index, open=df_tf['Open'], high=df_tf['High'], low=df_tf['Low'], close=df_tf['Close'], name="Price"
-            ))
+            fig_tf.add_trace(go.Candlestick(x=df_tf.index, open=df_tf['Open'], high=df_tf['High'], low=df_tf['Low'], close=df_tf['Close'], name="Price"))
             
-            # Draw High, Low, Middle lines
             fig_tf.add_hline(y=high_val, line_dash="dash", line_color="#ff5252", annotation_text="High Breakout Zone")
             fig_tf.add_hline(y=mid_val, line_dash="dot", line_color="#e0e0e0", annotation_text="Equilibrium Mid")
             fig_tf.add_hline(y=low_val, line_dash="dash", line_color="#00e676", annotation_text="Low Support Zone")
             
-            # Check Breakout Symbols
             last_close = df_tf['Close'].iloc[-1]
             if last_close >= high_val:
                 fig_tf.add_trace(go.Scatter(x=[df_tf.index[-1]], y=[last_close], mode="markers+text", text=["⚡ BREAKOUT HIGH"], marker=dict(size=12, color="#00e676")))
@@ -358,13 +367,13 @@ for idx, (tf_code, tf_label) in enumerate(timeframes):
 st.markdown("---")
 
 # -------------------------------------------------------------------
-# 7. 1m CANDLE PATTERN & ORDER FORMATION TRACKER
+# 8. 1m CANDLE PATTERN & ORDER FORMATION TRACKER
 # -------------------------------------------------------------------
 st.subheader("⏱️ Live 1-Minute Candle Pattern & Order Flow Breakdown")
 c_col1, c_col2, c_col3 = st.columns(3)
 
 for idx, sym in enumerate(top_3_stocks):
-    df_1m = fetch_stock_data(sym, period="1d", interval="1m")
+    df_1m = fetch_stock_data(sym, timeframe="1m")
     pattern, buy_ord, sell_ord = identify_1m_candle_pattern(df_1m)
     
     with [c_col1, c_col2, c_col3][idx]:
@@ -377,7 +386,7 @@ for idx, sym in enumerate(top_3_stocks):
 st.markdown("---")
 
 # -------------------------------------------------------------------
-# 8. AI CHATBOT ASSISTANT
+# 9. AI CHATBOT ASSISTANT
 # -------------------------------------------------------------------
 st.subheader("🤖 Shadow AI Strategy Chatbot")
 st.caption("Ask questions about FII/DII data, Order Flow, VWAP Breakouts, or 1m candle patterns.")
@@ -403,9 +412,9 @@ if prompt := st.chat_input("Ask about strategy, entries, or market status..."):
         elif "fii" in q or "dii" in q:
             ans = "FIIs and DIIs drive major liquidity. Current institutional flow shows net positive absorption supporting bullish VWAP breakouts."
         elif "order flow" in q or "footprint" in q:
-            ans = "Footprint charts calculate the volume delta (Buy Orders vs Sell Orders) at each level to pinpoint institutional accumulation."
+            ans = "Order flow and footprint sections track buyer/seller imbalances, cumulative volume deltas, and institutional support/resistance."
         else:
-            ans = f"Regarding **'{prompt}'**: Our system combines RSI, VWAP, Order Flow Delta, and Multi-timeframe (1h, 15m, 1d) level breaks to automatically generate high-probability Buy/Sell entry signals."
+            ans = f"Regarding **'{prompt}'**: Our system combines RSI, VWAP, Order Flow Delta, and Multi-timeframe level breaks to automatically generate high-probability Buy/Sell entry signals."
         
         st.markdown(ans)
         st.session_state.messages.append({"role": "assistant", "content": ans})
