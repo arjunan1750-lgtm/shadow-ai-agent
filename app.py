@@ -154,6 +154,22 @@ def enrich_stock_signals(df):
             
     return df
 
+def apply_market_rangebreaks(fig, timeframe):
+    """Removes non-trading hours and weekends to fix timeline alignment and candle gaps."""
+    if timeframe != "1d":
+        fig.update_xaxes(
+            rangebreaks=[
+                dict(bounds=["sat", "mon"]), # Hide weekends
+                dict(bounds=[15.5, 9.25], pattern="hour") # Hide outside trading hours (15:30 to 09:15)
+            ]
+        )
+    else:
+        fig.update_xaxes(
+            rangebreaks=[
+                dict(bounds=["sat", "mon"]) # Hide weekends only for 1d
+            ]
+        )
+
 def identify_1m_candle_pattern(df_1m):
     if df_1m.empty or len(df_1m) < 1:
         return "Unknown", 0, 0
@@ -240,7 +256,7 @@ st.markdown("---")
 # 5. SECTION A: DYNAMIC ORDER FLOW CHART (TIME-ALIGNED)
 # -------------------------------------------------------------------
 st.subheader("📈 Section A: Dynamic Order Flow Chart (Top 3 Stocks)")
-st.caption("Synchronized time alignment across Price, VWAP, and Cumulative Delta panels.")
+st.caption("Strictly aligned datetime index with synchronized zoom & pan.")
 
 of_tf = st.select_slider(
     "⏱️ Toggle Timeframe (Order Flow Chart)",
@@ -266,7 +282,6 @@ for idx, sym in enumerate(top_3_stocks):
         m3.metric("RSI (14)", f"{latest['RSI']:.1f}")
         m4.metric("Net Delta Vol", f"{latest['Delta']:.0f}")
         
-        # Link subplots along time x-axis
         fig_of = make_subplots(
             rows=2, cols=1, 
             shared_xaxes=True, 
@@ -274,17 +289,15 @@ for idx, sym in enumerate(top_3_stocks):
             vertical_spacing=0.03
         )
         
-        time_x = df.index.strftime("%Y-%m-%d %H:%M")
-        
         # Candlestick
         fig_of.add_trace(
-            go.Candlestick(x=time_x, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), 
+            go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), 
             row=1, col=1
         )
         
         # VWAP
         fig_of.add_trace(
-            go.Scatter(x=time_x, y=df['VWAP'], mode='lines', name='VWAP', line=dict(color='yellow', width=1.5)), 
+            go.Scatter(x=df.index, y=df['VWAP'], mode='lines', name='VWAP', line=dict(color='yellow', width=1.5)), 
             row=1, col=1
         )
         
@@ -294,14 +307,14 @@ for idx, sym in enumerate(top_3_stocks):
         
         if not buys.empty:
             fig_of.add_trace(go.Scatter(
-                x=buys.index.strftime("%Y-%m-%d %H:%M"), y=buys['Signal_Price'], mode='markers+text',
+                x=buys.index, y=buys['Signal_Price'], mode='markers+text',
                 text=['BUY ENTRY'] * len(buys), textposition='bottom center',
                 marker=dict(symbol='triangle-up', size=11, color='#00e676'), name='Buy Entry'
             ), row=1, col=1)
             
         if not sells.empty:
             fig_of.add_trace(go.Scatter(
-                x=sells.index.strftime("%Y-%m-%d %H:%M"), y=sells['Signal_Price'], mode='markers+text',
+                x=sells.index, y=sells['Signal_Price'], mode='markers+text',
                 text=['SELL ENTRY'] * len(sells), textposition='top center',
                 marker=dict(symbol='triangle-down', size=11, color='#ff5252'), name='Sell Entry'
             ), row=1, col=1)
@@ -309,12 +322,12 @@ for idx, sym in enumerate(top_3_stocks):
         # Delta Volume
         colors = ['#00e676' if d > 0 else '#ff5252' for d in df['Delta']]
         fig_of.add_trace(
-            go.Bar(x=time_x, y=df['Delta'], name='Delta Volume', marker_color=colors), 
+            go.Bar(x=df.index, y=df['Delta'], name='Delta Volume', marker_color=colors), 
             row=2, col=1
         )
         
-        # Enforce aligned category order and shared range across x-axes
-        fig_of.update_xaxes(type='category', categoryorder='category ascending', matches='x')
+        fig_of.update_xaxes(matches='x')
+        apply_market_rangebreaks(fig_of, of_tf)
         fig_of.update_layout(template="plotly_dark", height=480, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig_of, use_container_width=True)
 
@@ -324,7 +337,7 @@ st.markdown("---")
 # 6. SECTION B: DYNAMIC FOOTPRINT CHART (TIME-ALIGNED)
 # -------------------------------------------------------------------
 st.subheader("👣 Section B: Dynamic Footprint Chart (Top 3 Stocks)")
-st.caption("Time-aligned order flow distribution and buy/sell volume clusters.")
+st.caption("Aligned order flow volume distribution and buy/sell clusters.")
 
 fp_tf = st.select_slider(
     "⏱️ Toggle Timeframe (Footprint Chart)",
@@ -342,7 +355,6 @@ for idx, sym in enumerate(top_3_stocks):
             continue
             
         df = enrich_stock_signals(df)
-        time_x = df.index.strftime("%Y-%m-%d %H:%M")
         
         fig_fp = make_subplots(
             rows=2, cols=1, 
@@ -353,22 +365,22 @@ for idx, sym in enumerate(top_3_stocks):
         
         # Price Candlestick
         fig_fp.add_trace(
-            go.Candlestick(x=time_x, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), 
+            go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), 
             row=1, col=1
         )
         
         # Footprint Order Clusters
         fig_fp.add_trace(
-            go.Bar(x=time_x, y=df['Buy_Orders'], name='Buy Volume Cluster', marker_color='#00e676'), 
+            go.Bar(x=df.index, y=df['Buy_Orders'], name='Buy Volume Cluster', marker_color='#00e676'), 
             row=2, col=1
         )
         fig_fp.add_trace(
-            go.Bar(x=time_x, y=-df['Sell_Orders'], name='Sell Volume Cluster', marker_color='#ff5252'), 
+            go.Bar(x=df.index, y=-df['Sell_Orders'], name='Sell Volume Cluster', marker_color='#ff5252'), 
             row=2, col=1
         )
         
-        # Synchronize time-frame axes
-        fig_fp.update_xaxes(type='category', categoryorder='category ascending', matches='x')
+        fig_fp.update_xaxes(matches='x')
+        apply_market_rangebreaks(fig_fp, fp_tf)
         fig_fp.update_layout(barmode='relative', template="plotly_dark", height=480, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig_fp, use_container_width=True)
 
@@ -378,7 +390,7 @@ st.markdown("---")
 # 7. MULTI-TIMEFRAME HORIZONTAL ANALYSIS BOX
 # -------------------------------------------------------------------
 st.subheader("📐 Multi-Timeframe Horizontal Analysis Box")
-st.caption("Side-by-side breakout levels with synchronized time formats.")
+st.caption("Side-by-side breakout levels aligned without market gaps.")
 
 selected_chart_stock = st.selectbox("Select Stock for Multi-TF Breakdown", top_3_stocks)
 
@@ -400,10 +412,9 @@ for idx in range(3):
             high_val = df_tf['High'].max()
             low_val = df_tf['Low'].min()
             mid_val = (high_val + low_val) / 2
-            time_x = df_tf.index.strftime("%Y-%m-%d %H:%M")
             
             fig_tf = go.Figure()
-            fig_tf.add_trace(go.Candlestick(x=time_x, open=df_tf['Open'], high=df_tf['High'], low=df_tf['Low'], close=df_tf['Close'], name="Price"))
+            fig_tf.add_trace(go.Candlestick(x=df_tf.index, open=df_tf['Open'], high=df_tf['High'], low=df_tf['Low'], close=df_tf['Close'], name="Price"))
             
             fig_tf.add_hline(y=high_val, line_dash="dash", line_color="#ff5252", annotation_text="High Breakout Zone")
             fig_tf.add_hline(y=mid_val, line_dash="dot", line_color="#e0e0e0", annotation_text="Equilibrium Mid")
@@ -411,11 +422,11 @@ for idx in range(3):
             
             last_close = df_tf['Close'].iloc[-1]
             if last_close >= high_val:
-                fig_tf.add_trace(go.Scatter(x=[time_x[-1]], y=[last_close], mode="markers+text", text=["⚡ BREAKOUT HIGH"], marker=dict(size=12, color="#00e676")))
+                fig_tf.add_trace(go.Scatter(x=[df_tf.index[-1]], y=[last_close], mode="markers+text", text=["⚡ BREAKOUT HIGH"], marker=dict(size=12, color="#00e676")))
             elif last_close <= low_val:
-                fig_tf.add_trace(go.Scatter(x=[time_x[-1]], y=[last_close], mode="markers+text", text=["🚨 BREAKDOWN LOW"], marker=dict(size=12, color="#ff5252")))
+                fig_tf.add_trace(go.Scatter(x=[df_tf.index[-1]], y=[last_close], mode="markers+text", text=["🚨 BREAKDOWN LOW"], marker=dict(size=12, color="#ff5252")))
 
-            fig_tf.update_xaxes(type='category', categoryorder='category ascending')
+            apply_market_rangebreaks(fig_tf, chosen_tf)
             fig_tf.update_layout(template="plotly_dark", height=380, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
             st.plotly_chart(fig_tf, use_container_width=True)
 
