@@ -237,10 +237,10 @@ for idx, sym in enumerate(top_3_stocks):
 st.markdown("---")
 
 # -------------------------------------------------------------------
-# 5. SECTION A: DYNAMIC ORDER FLOW CHART (TOP 3 STOCKS)
+# 5. SECTION A: DYNAMIC ORDER FLOW CHART (TIME-ALIGNED)
 # -------------------------------------------------------------------
 st.subheader("📈 Section A: Dynamic Order Flow Chart (Top 3 Stocks)")
-st.caption("Displays Cumulative Volume Delta, Bid/Ask imbalances, VWAP, and entry signals.")
+st.caption("Synchronized time alignment across Price, VWAP, and Cumulative Delta panels.")
 
 of_tf = st.select_slider(
     "⏱️ Toggle Timeframe (Order Flow Chart)",
@@ -266,31 +266,65 @@ for idx, sym in enumerate(top_3_stocks):
         m3.metric("RSI (14)", f"{latest['RSI']:.1f}")
         m4.metric("Net Delta Vol", f"{latest['Delta']:.0f}")
         
-        fig_of = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
-        fig_of.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
-        fig_of.add_trace(go.Scatter(x=df.index, y=df['VWAP'], mode='lines', name='VWAP', line=dict(color='yellow', width=1.5)), row=1, col=1)
+        # Link subplots along time x-axis
+        fig_of = make_subplots(
+            rows=2, cols=1, 
+            shared_xaxes=True, 
+            row_heights=[0.7, 0.3], 
+            vertical_spacing=0.03
+        )
         
+        time_x = df.index.strftime("%Y-%m-%d %H:%M")
+        
+        # Candlestick
+        fig_of.add_trace(
+            go.Candlestick(x=time_x, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), 
+            row=1, col=1
+        )
+        
+        # VWAP
+        fig_of.add_trace(
+            go.Scatter(x=time_x, y=df['VWAP'], mode='lines', name='VWAP', line=dict(color='yellow', width=1.5)), 
+            row=1, col=1
+        )
+        
+        # Signals
         buys = df[df['Signal'] == 'BUY']
         sells = df[df['Signal'] == 'SELL']
         
-        fig_of.add_trace(go.Scatter(x=buys.index, y=buys['Signal_Price'], mode='markers+text', text=['BUY ENTRY'] * len(buys),
-                                    textposition='bottom center', marker=dict(symbol='triangle-up', size=11, color='#00e676'), name='Buy Entry'), row=1, col=1)
-        fig_of.add_trace(go.Scatter(x=sells.index, y=sells['Signal_Price'], mode='markers+text', text=['SELL ENTRY'] * len(sells),
-                                    textposition='top center', marker=dict(symbol='triangle-down', size=11, color='#ff5252'), name='Sell Entry'), row=1, col=1)
+        if not buys.empty:
+            fig_of.add_trace(go.Scatter(
+                x=buys.index.strftime("%Y-%m-%d %H:%M"), y=buys['Signal_Price'], mode='markers+text',
+                text=['BUY ENTRY'] * len(buys), textposition='bottom center',
+                marker=dict(symbol='triangle-up', size=11, color='#00e676'), name='Buy Entry'
+            ), row=1, col=1)
+            
+        if not sells.empty:
+            fig_of.add_trace(go.Scatter(
+                x=sells.index.strftime("%Y-%m-%d %H:%M"), y=sells['Signal_Price'], mode='markers+text',
+                text=['SELL ENTRY'] * len(sells), textposition='top center',
+                marker=dict(symbol='triangle-down', size=11, color='#ff5252'), name='Sell Entry'
+            ), row=1, col=1)
         
+        # Delta Volume
         colors = ['#00e676' if d > 0 else '#ff5252' for d in df['Delta']]
-        fig_of.add_trace(go.Bar(x=df.index, y=df['Delta'], name='Delta Volume', marker_color=colors), row=2, col=1)
+        fig_of.add_trace(
+            go.Bar(x=time_x, y=df['Delta'], name='Delta Volume', marker_color=colors), 
+            row=2, col=1
+        )
         
+        # Enforce aligned category order and shared range across x-axes
+        fig_of.update_xaxes(type='category', categoryorder='category ascending', matches='x')
         fig_of.update_layout(template="plotly_dark", height=480, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig_of, use_container_width=True)
 
 st.markdown("---")
 
 # -------------------------------------------------------------------
-# 6. SECTION B: DYNAMIC FOOTPRINT CHART (TOP 3 STOCKS)
+# 6. SECTION B: DYNAMIC FOOTPRINT CHART (TIME-ALIGNED)
 # -------------------------------------------------------------------
 st.subheader("👣 Section B: Dynamic Footprint Chart (Top 3 Stocks)")
-st.caption("Visualizes precise volume distribution, liquidity zones, and buying/selling order clusters.")
+st.caption("Time-aligned order flow distribution and buy/sell volume clusters.")
 
 fp_tf = st.select_slider(
     "⏱️ Toggle Timeframe (Footprint Chart)",
@@ -308,14 +342,33 @@ for idx, sym in enumerate(top_3_stocks):
             continue
             
         df = enrich_stock_signals(df)
+        time_x = df.index.strftime("%Y-%m-%d %H:%M")
         
-        fig_fp = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.65, 0.35], vertical_spacing=0.03)
-        fig_fp.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+        fig_fp = make_subplots(
+            rows=2, cols=1, 
+            shared_xaxes=True, 
+            row_heights=[0.65, 0.35], 
+            vertical_spacing=0.03
+        )
         
-        # Footprint Buy vs Sell order volume stacked representation
-        fig_fp.add_trace(go.Bar(x=df.index, y=df['Buy_Orders'], name='Buy Volume Cluster', marker_color='#00e676'), row=2, col=1)
-        fig_fp.add_trace(go.Bar(x=df.index, y=-df['Sell_Orders'], name='Sell Volume Cluster', marker_color='#ff5252'), row=2, col=1)
+        # Price Candlestick
+        fig_fp.add_trace(
+            go.Candlestick(x=time_x, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), 
+            row=1, col=1
+        )
         
+        # Footprint Order Clusters
+        fig_fp.add_trace(
+            go.Bar(x=time_x, y=df['Buy_Orders'], name='Buy Volume Cluster', marker_color='#00e676'), 
+            row=2, col=1
+        )
+        fig_fp.add_trace(
+            go.Bar(x=time_x, y=-df['Sell_Orders'], name='Sell Volume Cluster', marker_color='#ff5252'), 
+            row=2, col=1
+        )
+        
+        # Synchronize time-frame axes
+        fig_fp.update_xaxes(type='category', categoryorder='category ascending', matches='x')
         fig_fp.update_layout(barmode='relative', template="plotly_dark", height=480, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig_fp, use_container_width=True)
 
@@ -325,7 +378,7 @@ st.markdown("---")
 # 7. MULTI-TIMEFRAME HORIZONTAL ANALYSIS BOX
 # -------------------------------------------------------------------
 st.subheader("📐 Multi-Timeframe Horizontal Analysis Box")
-st.caption("Side-by-side breakout levels with custom timeframe switches per chart block.")
+st.caption("Side-by-side breakout levels with synchronized time formats.")
 
 selected_chart_stock = st.selectbox("Select Stock for Multi-TF Breakdown", top_3_stocks)
 
@@ -347,9 +400,10 @@ for idx in range(3):
             high_val = df_tf['High'].max()
             low_val = df_tf['Low'].min()
             mid_val = (high_val + low_val) / 2
+            time_x = df_tf.index.strftime("%Y-%m-%d %H:%M")
             
             fig_tf = go.Figure()
-            fig_tf.add_trace(go.Candlestick(x=df_tf.index, open=df_tf['Open'], high=df_tf['High'], low=df_tf['Low'], close=df_tf['Close'], name="Price"))
+            fig_tf.add_trace(go.Candlestick(x=time_x, open=df_tf['Open'], high=df_tf['High'], low=df_tf['Low'], close=df_tf['Close'], name="Price"))
             
             fig_tf.add_hline(y=high_val, line_dash="dash", line_color="#ff5252", annotation_text="High Breakout Zone")
             fig_tf.add_hline(y=mid_val, line_dash="dot", line_color="#e0e0e0", annotation_text="Equilibrium Mid")
@@ -357,10 +411,11 @@ for idx in range(3):
             
             last_close = df_tf['Close'].iloc[-1]
             if last_close >= high_val:
-                fig_tf.add_trace(go.Scatter(x=[df_tf.index[-1]], y=[last_close], mode="markers+text", text=["⚡ BREAKOUT HIGH"], marker=dict(size=12, color="#00e676")))
+                fig_tf.add_trace(go.Scatter(x=[time_x[-1]], y=[last_close], mode="markers+text", text=["⚡ BREAKOUT HIGH"], marker=dict(size=12, color="#00e676")))
             elif last_close <= low_val:
-                fig_tf.add_trace(go.Scatter(x=[df_tf.index[-1]], y=[last_close], mode="markers+text", text=["🚨 BREAKDOWN LOW"], marker=dict(size=12, color="#ff5252")))
+                fig_tf.add_trace(go.Scatter(x=[time_x[-1]], y=[last_close], mode="markers+text", text=["🚨 BREAKDOWN LOW"], marker=dict(size=12, color="#ff5252")))
 
+            fig_tf.update_xaxes(type='category', categoryorder='category ascending')
             fig_tf.update_layout(template="plotly_dark", height=380, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
             st.plotly_chart(fig_tf, use_container_width=True)
 
@@ -412,7 +467,7 @@ if prompt := st.chat_input("Ask about strategy, entries, or market status..."):
         elif "fii" in q or "dii" in q:
             ans = "FIIs and DIIs drive major liquidity. Current institutional flow shows net positive absorption supporting bullish VWAP breakouts."
         elif "order flow" in q or "footprint" in q:
-            ans = "Order flow and footprint sections track buyer/seller imbalances, cumulative volume deltas, and institutional support/resistance."
+            ans = "Order flow and footprint sections track buyer/seller imbalances, cumulative volume deltas, and institutional support/resistance with time-synchronized axes."
         else:
             ans = f"Regarding **'{prompt}'**: Our system combines RSI, VWAP, Order Flow Delta, and Multi-timeframe level breaks to automatically generate high-probability Buy/Sell entry signals."
         
