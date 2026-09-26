@@ -1,4 +1,5 @@
 import datetime
+import zoneinfo
 import time
 import numpy as np
 import pandas as pd
@@ -7,6 +8,12 @@ from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 import yfinance as yf
+
+# Auto-refresh component (Fall back to rerun if custom component is not installed)
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
 
 # -------------------------------------------------------------------
 # 1. PAGE CONFIGURATION & DARK THEME
@@ -55,6 +62,14 @@ st.markdown("""
     border-radius: 5px;
     margin: 10px 0px;
 }
+.market-closed-box {
+    padding: 20px;
+    background-color: #261214;
+    border: 1px solid #ff5252;
+    border-radius: 10px;
+    text-align: center;
+    margin-bottom: 25px;
+}
 
 /* Progress Bar Custom Styling */
 .progress-container {
@@ -101,7 +116,29 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# HELPER CALCULATIONS & PATTERN DETECTION
+# 2. INDIAN MARKET OPEN/CLOSE TIME CHECK (NSE/BSE)
+# -------------------------------------------------------------------
+def is_indian_market_open():
+    """Checks if the Indian Stock Market (NSE/BSE) is currently open."""
+    tz = zoneinfo.ZoneInfo("Asia/Kolkata")
+    now = datetime.datetime.now(tz)
+    
+    # Monday = 0, Sunday = 6
+    if now.weekday() >= 5:
+        return False, "Market is closed for the Weekend."
+    
+    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    
+    if market_open <= now <= market_close:
+        return True, "Market is OPEN"
+    elif now < market_open:
+        return False, f"Market opens today at 09:15 AM IST (Current Time: {now.strftime('%I:%M %p IST')})"
+    else:
+        return False, f"Market closed for today at 03:30 PM IST (Current Time: {now.strftime('%I:%M %p IST')})"
+
+# -------------------------------------------------------------------
+# HELPER CALCULATIONS & TECHNICAL ANALYSIS
 # -------------------------------------------------------------------
 def get_candle_pattern(open_p, high_p, low_p, close_p):
     body = abs(close_p - open_p)
@@ -123,15 +160,34 @@ def get_candle_pattern(open_p, high_p, low_p, close_p):
     else:
         return "Bearish Candle"
 
+def fetch_multi_timeframe_levels(symbol):
+    ticker = yf.Ticker(symbol)
+    
+    df_1d = ticker.history(period="5d", interval="1d")
+    h_1d = float(df_1d['High'].iloc[-1]) if not df_1d.empty else 0.0
+    l_1d = float(df_1d['Low'].iloc[-1]) if not df_1d.empty else 0.0
+    
+    df_1h = ticker.history(period="2d", interval="1h")
+    h_1h = float(df_1h['High'].iloc[-1]) if not df_1h.empty else 0.0
+    l_1h = float(df_1h['Low'].iloc[-1]) if not df_1h.empty else 0.0
+    
+    df_15m = ticker.history(period="1d", interval="15m")
+    h_15m = float(df_15m['High'].iloc[-1]) if not df_15m.empty else 0.0
+    l_15m = float(df_15m['Low'].iloc[-1]) if not df_15m.empty else 0.0
+    
+    return {
+        "1 Day (1D)": {"high": h_1d, "low": l_1d},
+        "1 Hour (1H)": {"high": h_1h, "low": l_1h},
+        "15 Min (15M)": {"high": h_15m, "low": l_15m},
+    }
+
 def analyze_1m_data(df):
-    """Calculates EMA, RSI, dynamic entry/target points, and detects reversals/momentum."""
     if len(df) < 15:
         return None
     
     df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
     df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
     
-    # RSI Calculation
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -143,32 +199,33 @@ def analyze_1m_data(df):
 
     pattern = get_candle_pattern(curr['Open'], curr['High'], curr['Low'], curr['Close'])
 
-    # Signals & Dynamic Levels
     signal = "NEUTRAL"
     reversal_alert = None
     
-    # Reversal checks
-    if pattern in ["Hammer / Bullish Pinbar"] or (prev['RSI'] < 30 and curr['RSI'] > 30):
-        reversal_alert = "BULLISH REVERSAL DETECTED"
+    if pattern == "Hammer / Bullish Pinbar" or (prev['RSI'] < 30 and curr['RSI'] > 30):
+        reversal_alert = "BULLISH REVERSAL DETECTED 🚀"
         signal = "BUY"
-    elif pattern in ["Shooting Star / Bearish Pinbar"] or (prev['RSI'] > 70 and curr['RSI'] < 70):
-        reversal_alert = "BEARISH REVERSAL DETECTED"
+    elif pattern == "Shooting Star / Bearish Pinbar" or (prev['RSI'] > 70 and curr['RSI'] < 70):
+        reversal_alert = "BEARISH REVERSAL DETECTED ⚠️"
         signal = "SELL"
     elif curr['EMA9'] > curr['EMA20']:
         signal = "BUY"
     else:
         signal = "SELL"
 
-    # Set Dynamic Entry, Targets, and Stops
     entry_price = float(curr['Close'])
-    atr = float(curr['High'] - curr['Low']) if (curr['High'] - curr['Low']) > 0 else entry_price * 0.002
+    atr = float(curr['High'] - curr['Low']) if (curr['High'] - curr['Low']) > 0 else entry_price * 0.0015
     
     if signal == "BUY":
         target = entry_price + (1.5 * atr)
         stop_loss = entry_price - (1.0 * atr)
+        price_move = curr['Close'] - curr['Open']
+        target_pct = min(100.0, max(-10.0, (price_move / (1.5 * atr)) * 100))
     else:
         target = entry_price - (1.5 * atr)
         stop_loss = entry_price + (1.0 * atr)
+        price_move = curr['Open'] - curr['Close']
+        target_pct = min(100.0, max(-10.0, (price_move / (1.5 * atr)) * 100))
 
     return {
         "df": df,
@@ -178,112 +235,34 @@ def analyze_1m_data(df):
         "reversal_alert": reversal_alert,
         "entry": entry_price,
         "target": target,
-        "stop_loss": stop_loss
+        "stop_loss": stop_loss,
+        "target_pct": float(target_pct)
     }
 
 # -------------------------------------------------------------------
-# SAMPLE / DYNAMIC DATA SETUP
+# MAIN DASHBOARD EXECUTION
 # -------------------------------------------------------------------
-# Target calculation (-10% to 100%)
-target_pct = 45.0  # Dynamic percentage value from current movement
-clamped_pct = max(-10.0, min(100.0, target_pct))
-visual_width = ((clamped_pct + 10) / 110) * 100
-
 st.title("Shadow AI Trading Agent 🐱")
 
-# -------------------------------------------------------------------
-# SECTION 1: TARGET PROGRESS BAR
-# -------------------------------------------------------------------
-st.markdown("### 🎯 Target Progress")
-st.markdown(f"""
-<div class="status-card">
-    <div style="display: flex; justify-content: space-between;">
-        <span class="metric-label">Progress to Target (-10% to +100%)</span>
-        <span class="metric-value">{target_pct:.1f}%</span>
+market_open, market_msg = is_indian_market_open()
+
+if not market_open:
+    st.markdown(f"""
+    <div class="market-closed-box">
+        <h2 style="color: #ff5252; margin-top: 0;">🔴 Indian Stock Market is Closed</h2>
+        <p style="font-size: 16px;">{market_msg}</p>
+        <p style="color: #b2b5be; font-size: 14px;">Live 1-Minute signal execution and auto-refresh will resume automatically during trading hours (09:15 AM - 03:30 PM IST, Monday to Friday).</p>
     </div>
-    <div class="progress-container">
-        <div class="progress-bar-fill" style="width: {visual_width:.1f}%;"></div>
-        <div class="progress-text">{target_pct:.1f}% Target Achieved</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# -------------------------------------------------------------------
-# SECTION 2: TIMEFRAME BREAKOUT LEVELS (1D, 1H, 15M)
-# -------------------------------------------------------------------
-st.markdown("### 📊 Multi-Timeframe Level Analysis (High, Low, Middle)")
-
-tf_data = {
-    "1 Day (1D)": {"high": 18250.00, "low": 18000.00},
-    "1 Hour (1H)": {"high": 18180.00, "low": 18090.00},
-    "15 Min (15M)": {"high": 18150.00, "low": 18110.00},
-}
-
-cols = st.columns(3)
-for i, (tf_name, levels) in enumerate(tf_data.items()):
-    high = levels["high"]
-    low = levels["low"]
-    middle = (high + low) / 2.0
-    
-    with cols[i]:
-        st.markdown(f"""
-        <div class="section-box">
-            <div class="section-title">{tf_name}</div>
-            <p><strong>High:</strong> <span class="metric-value" style="font-size: 16px;">{high:.2f}</span></p>
-            <p><strong>Middle (Midpoint):</strong> <span style="font-size: 16px; color: #ffeb3b;">{middle:.2f}</span></p>
-            <p><strong>Low:</strong> <span class="metric-value-red" style="font-size: 16px;">{low:.2f}</span></p>
-        </div>
-        """, unsafe_allow_html=True)
-
-# -------------------------------------------------------------------
-# SECTION 3: 1M ORDER EXECUTION & 5M DIRECTION/CONFIRMATION
-# -------------------------------------------------------------------
-st.markdown("### ⚡ Microstructure Analysis (1M Candle Execution & 5M Strategy Zone)")
-
-m1_m5_col1, m1_m5_col2 = st.columns(2)
-
-with m1_m5_col1:
-    st.markdown("""
-    <div class="section-box">
-        <div class="section-title">1-Minute Order & Pattern Tracker</div>
     """, unsafe_allow_html=True)
+else:
+    # Trigger Auto-Refresh Every 60 Seconds during trading hours
+    if st_autorefresh:
+        st_autorefresh(interval=60000, key="market_live_refresh")
     
-    c_open, c_high, c_low, c_close = 18120.0, 18145.0, 18118.0, 18142.0
-    pattern_1m = get_candle_pattern(c_open, c_high, c_low, c_close)
-    action_1m = "BUY ORDER" if c_close > c_open else "SELL ORDER"
-    action_color = "#00e676" if action_1m == "BUY ORDER" else "#ff5252"
-    
-    st.markdown(f"**Latest 1M Candle Action:** <span style='color:{action_color}; font-weight:bold;'>{action_1m} PLACED</span>", unsafe_allow_html=True)
-    st.markdown(f"**Formed Candle Pattern:** `{pattern_1m}`")
-    st.markdown(f"- **Open:** {c_open} | **High:** {c_high}")
-    st.markdown(f"- **Low:** {c_low} | **Close:** {c_close}")
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.success(f"🟢 Market is OPEN. Auto-refresh active (Interval: 1 min).")
 
-with m1_m5_col2:
-    st.markdown("""
-    <div class="section-box">
-        <div class="section-title">5-Minute Trend, Confirmation & Zone Marking</div>
-    """, unsafe_allow_html=True)
-    
-    m5_direction = "BULLISH 📈"
-    m5_confirmation = "CONFIRMED (Volume Spike + Above EMA 20)"
-    m5_zone = "Demand / Support Zone (18100 - 18115)"
-    next_pos_high = 18165.00
-    next_pos_low = 18105.00
-    
-    st.markdown(f"**5M Overall Direction:** `{m5_direction}`")
-    st.markdown(f"**Confirmation Status:** `{m5_confirmation}`")
-    st.markdown(f"**Zone Indication:** `{m5_zone}`")
-    st.markdown("---")
-    st.markdown(f"🎯 **Next Possible High Target:** <span class='metric-value' style='font-size: 16px;'>{next_pos_high:.2f}</span>", unsafe_allow_html=True)
-    st.markdown(f"🛡️ **Next Possible Low Target:** <span class='metric-value-red' style='font-size: 16px;'>{next_pos_low:.2f}</span>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# -------------------------------------------------------------------
-# SECTION 4: TOP 10 NSE/BSE STOCKS & TOP 3 SELECTION WITH 1M CHARTS
-# -------------------------------------------------------------------
-st.markdown("---")
-st.markdown("### 🏛️ Top 10 Indian Stocks (NSE/BSE) & Top 3 Momentum Selection")
+# TOP 10 INDIAN STOCKS TABLE
+st.markdown("### 🏛️ Top 10 Indian Stocks (NSE/BSE) & Institutional Drivers")
 
 top_10_stocks = [
     {"Symbol": "RELIANCE.NS", "Name": "Reliance Industries", "FII_DII_Activity": "High Net Buying", "News": "Q2 Margin Expansion & Telecom Growth"},
@@ -298,66 +277,123 @@ top_10_stocks = [
     {"Symbol": "AXISBANK.NS", "Name": "Axis Bank", "FII_DII_Activity": "Institutional Buying", "News": "Net Interest Margin Expansion"},
 ]
 
-# Display Top 10 List
 st.dataframe(pd.DataFrame(top_10_stocks), use_container_width=True)
 
-# Select Top 3 based on institutional buying and positive news momentum
+# TOP 3 HIGH MOVEMENT STOCKS
 top_3 = [top_10_stocks[0], top_10_stocks[2], top_10_stocks[3]]
 
-st.markdown("#### 🚀 Selected Top 3 High-Momentum Stocks for Live 1-Minute Analysis")
+st.markdown("---")
+st.markdown("### 🚀 Dynamic Analysis & 1M Execution for Top 3 Stocks")
 
 chart_tabs = st.tabs([f"{s['Symbol']} ({s['Name']})" for s in top_3])
 
 for idx, stock in enumerate(top_3):
     symbol = stock["Symbol"]
     with chart_tabs[idx]:
-        st.markdown(f"**Institutional Activity:** `{stock['FII_DII_Activity']}` | **News Driver:** `{stock['News']}`")
-        
-        # Fetch 1m live data
         ticker = yf.Ticker(symbol)
         df_1m = ticker.history(period="1d", interval="1m")
         
         if df_1m.empty:
-            st.warning(f"Live 1-minute data unavailable for {symbol} at this moment.")
+            st.warning(f"Live 1-minute data currently unavailable for {symbol}.")
             continue
-            
+
         res = analyze_1m_data(df_1m)
         if not res:
-            st.info("Gathering more candles for analysis...")
+            st.info("Gathering candle data for complete technical analysis...")
             continue
             
-        data = res["df"]
+        tf_data = fetch_multi_timeframe_levels(symbol)
         
-        # Show Reversal Alert Banner if present
+        # 1. DYNAMIC TARGET PROGRESS BAR
+        target_pct = res["target_pct"]
+        clamped_pct = max(-10.0, min(100.0, target_pct))
+        visual_width = ((clamped_pct + 10) / 110) * 100
+
+        st.markdown(f"#### 🎯 Dynamic Target Progress ({symbol})")
+        st.markdown(f"""
+        <div class="status-card">
+            <div style="display: flex; justify-content: space-between;">
+                <span class="metric-label">Live Movement to Target (-10% to +100%)</span>
+                <span class="metric-value">{target_pct:.1f}%</span>
+            </div>
+            <div class="progress-container">
+                <div class="progress-bar-fill" style="width: {visual_width:.1f}%;"></div>
+                <div class="progress-text">{target_pct:.1f}% Target Achieved</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 2. MULTI-TIMEFRAME LEVEL ANALYSIS
+        st.markdown(f"#### 📊 Multi-Timeframe Level Analysis ({symbol})")
+        cols = st.columns(3)
+        for i, (tf_name, levels) in enumerate(tf_data.items()):
+            high = levels["high"]
+            low = levels["low"]
+            middle = (high + low) / 2.0 if (high and low) else 0.0
+            
+            with cols[i]:
+                st.markdown(f"""
+                <div class="section-box">
+                    <div class="section-title">{tf_name}</div>
+                    <p><strong>High:</strong> <span class="metric-value" style="font-size: 16px;">{high:.2f}</span></p>
+                    <p><strong>Middle:</strong> <span style="font-size: 16px; color: #ffeb3b;">{middle:.2f}</span></p>
+                    <p><strong>Low:</strong> <span class="metric-value-red" style="font-size: 16px;">{low:.2f}</span></p>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # 3. 1M ORDER & 5M ZONE ANALYSIS
+        st.markdown(f"#### ⚡ Microstructure Analysis & 1M Candle Execution ({symbol})")
+        m1_m5_col1, m1_m5_col2 = st.columns(2)
+
+        curr_candle = res["latest"]
+        action_1m = f"{res['signal']} ORDER"
+        action_color = "#00e676" if res['signal'] == "BUY" else "#ff5252"
+
+        with m1_m5_col1:
+            st.markdown(f"""
+            <div class="section-box">
+                <div class="section-title">1-Minute Live Order & Pattern Tracker</div>
+                <p><strong>Latest 1M Order:</strong> <span style='color:{action_color}; font-weight:bold;'>{action_1m} PLACED</span></p>
+                <p><strong>Formed Pattern:</strong> <code>{res['pattern']}</code></p>
+                <p>- <strong>Open:</strong> {curr_candle['Open']:.2f} | <strong>High:</strong> {curr_candle['High']:.2f}</p>
+                <p>- <strong>Low:</strong> {curr_candle['Low']:.2f} | <strong>Close:</strong> {curr_candle['Close']:.2f}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with m1_m5_col2:
+            m5_dir = "BULLISH 📈" if res['signal'] == "BUY" else "BEARISH 📉"
+            st.markdown(f"""
+            <div class="section-box">
+                <div class="section-title">5-Minute Direction & Key Marking</div>
+                <p><strong>5M Direction:</strong> <code>{m5_dir}</code></p>
+                <p><strong>Confirmation:</strong> <code>EMA Cross & RSI Alignment</code></p>
+                <p><strong>Zone Indication:</strong> <code>Support/Demand ({res['stop_loss']:.2f} - {res['entry']:.2f})</code></p>
+                <hr style="margin: 8px 0;">
+                <p>🎯 <strong>Next Target High:</strong> <span class='metric-value' style='font-size: 16px;'>{res['target']:.2f}</span></p>
+                <p>🛡️ <strong>Next Target Low:</strong> <span class='metric-value-red' style='font-size: 16px;'>{res['stop_loss']:.2f}</span></p>
+            </div>
+            """, unsafe_allow_html=True)
+
         if res["reversal_alert"]:
             st.markdown(f"""
             <div class="alert-box">
-                ⚠️ <strong>ALERT:</strong> {res['reversal_alert']} on 1-Minute Chart for {symbol}!
+                ⚠️ <strong>REVERSAL ALERT:</strong> {res['reversal_alert']} on 1-Minute Chart for {symbol}!
             </div>
             """, unsafe_allow_html=True)
-            
-        st.markdown(f"""
-        - **Pattern Detected:** `{res['pattern']}`
-        - **Dynamic Entry Point:** `{res['entry']:.2f}`
-        - **Target Point (1.5x ATR):** `{res['target']:.2f}`
-        - **Stop Loss:** `{res['stop_loss']:.2f}`
-        """)
 
-        # Render 1-Minute Plotly Chart
+        # 4. LIVE 1-MINUTE PLOTLY CHART WITH MARKERS
+        data = res["df"]
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
 
-        # Candlestick chart
         fig.add_trace(go.Candlestick(
             x=data.index,
             open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'],
             name="1M Price"
         ), row=1, col=1)
 
-        # EMAs
         fig.add_trace(go.Scatter(x=data.index, y=data['EMA9'], line=dict(color='#00e676', width=1), name="EMA 9"), row=1, col=1)
         fig.add_trace(go.Scatter(x=data.index, y=data['EMA20'], line=dict(color='#ff5252', width=1), name="EMA 20"), row=1, col=1)
 
-        # Marker for Entry & Target
         last_time = data.index[-1]
         fig.add_trace(go.Scatter(
             x=[last_time], y=[res['entry']],
@@ -373,7 +409,6 @@ for idx, stock in enumerate(top_3):
             text=[f" Target: {res['target']:.2f}"], textposition="top right", name="Target"
         ), row=1, col=1)
 
-        # Volume
         fig.add_trace(go.Bar(x=data.index, y=data['Volume'], marker_color='#2962ff', name="Volume"), row=2, col=1)
 
         fig.update_layout(
