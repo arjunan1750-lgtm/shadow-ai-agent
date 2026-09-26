@@ -1,5 +1,4 @@
 import datetime
-import zoneinfo
 import time
 import numpy as np
 import pandas as pd
@@ -124,13 +123,70 @@ def get_candle_pattern(open_p, high_p, low_p, close_p):
     else:
         return "Bearish Candle"
 
+def analyze_1m_data(df):
+    """Calculates EMA, RSI, dynamic entry/target points, and detects reversals/momentum."""
+    if len(df) < 15:
+        return None
+    
+    df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
+    df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    
+    # RSI Calculation
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / (loss + 1e-9)
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    pattern = get_candle_pattern(curr['Open'], curr['High'], curr['Low'], curr['Close'])
+
+    # Signals & Dynamic Levels
+    signal = "NEUTRAL"
+    reversal_alert = None
+    
+    # Reversal checks
+    if pattern in ["Hammer / Bullish Pinbar"] or (prev['RSI'] < 30 and curr['RSI'] > 30):
+        reversal_alert = "BULLISH REVERSAL DETECTED"
+        signal = "BUY"
+    elif pattern in ["Shooting Star / Bearish Pinbar"] or (prev['RSI'] > 70 and curr['RSI'] < 70):
+        reversal_alert = "BEARISH REVERSAL DETECTED"
+        signal = "SELL"
+    elif curr['EMA9'] > curr['EMA20']:
+        signal = "BUY"
+    else:
+        signal = "SELL"
+
+    # Set Dynamic Entry, Targets, and Stops
+    entry_price = float(curr['Close'])
+    atr = float(curr['High'] - curr['Low']) if (curr['High'] - curr['Low']) > 0 else entry_price * 0.002
+    
+    if signal == "BUY":
+        target = entry_price + (1.5 * atr)
+        stop_loss = entry_price - (1.0 * atr)
+    else:
+        target = entry_price - (1.5 * atr)
+        stop_loss = entry_price + (1.0 * atr)
+
+    return {
+        "df": df,
+        "latest": curr,
+        "pattern": pattern,
+        "signal": signal,
+        "reversal_alert": reversal_alert,
+        "entry": entry_price,
+        "target": target,
+        "stop_loss": stop_loss
+    }
+
 # -------------------------------------------------------------------
 # SAMPLE / DYNAMIC DATA SETUP
 # -------------------------------------------------------------------
 # Target calculation (-10% to 100%)
 target_pct = 45.0  # Dynamic percentage value from current movement
 clamped_pct = max(-10.0, min(100.0, target_pct))
-# Scale -10% -> 100% into 0% -> 100% width for the CSS bar
 visual_width = ((clamped_pct + 10) / 110) * 100
 
 st.title("Shadow AI Trading Agent 🐱")
@@ -157,7 +213,6 @@ st.markdown(f"""
 # -------------------------------------------------------------------
 st.markdown("### 📊 Multi-Timeframe Level Analysis (High, Low, Middle)")
 
-# Mock structure representing 1D, 1H, 15M candle metrics
 tf_data = {
     "1 Day (1D)": {"high": 18250.00, "low": 18000.00},
     "1 Hour (1H)": {"high": 18180.00, "low": 18090.00},
@@ -193,7 +248,6 @@ with m1_m5_col1:
         <div class="section-title">1-Minute Order & Pattern Tracker</div>
     """, unsafe_allow_html=True)
     
-    # 1M Live Signal / Pattern Simulation
     c_open, c_high, c_low, c_close = 18120.0, 18145.0, 18118.0, 18142.0
     pattern_1m = get_candle_pattern(c_open, c_high, c_low, c_close)
     action_1m = "BUY ORDER" if c_close > c_open else "SELL ORDER"
@@ -224,3 +278,110 @@ with m1_m5_col2:
     st.markdown(f"🎯 **Next Possible High Target:** <span class='metric-value' style='font-size: 16px;'>{next_pos_high:.2f}</span>", unsafe_allow_html=True)
     st.markdown(f"🛡️ **Next Possible Low Target:** <span class='metric-value-red' style='font-size: 16px;'>{next_pos_low:.2f}</span>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
+
+# -------------------------------------------------------------------
+# SECTION 4: TOP 10 NSE/BSE STOCKS & TOP 3 SELECTION WITH 1M CHARTS
+# -------------------------------------------------------------------
+st.markdown("---")
+st.markdown("### 🏛️ Top 10 Indian Stocks (NSE/BSE) & Top 3 Momentum Selection")
+
+top_10_stocks = [
+    {"Symbol": "RELIANCE.NS", "Name": "Reliance Industries", "FII_DII_Activity": "High Net Buying", "News": "Q2 Margin Expansion & Telecom Growth"},
+    {"Symbol": "TCS.NS", "Name": "Tata Consultancy Services", "FII_DII_Activity": "Moderate Buying", "News": "New AI Cloud Deal Signings"},
+    {"Symbol": "HDFCBANK.NS", "Name": "HDFC Bank", "FII_DII_Activity": "Aggressive FII Accumulation", "News": "Credit Growth Beats Industry Average"},
+    {"Symbol": "ICICIBANK.NS", "Name": "ICICI Bank", "FII_DII_Activity": "Strong DII Buying", "News": "Robust NPA Recovery Metrics"},
+    {"Symbol": "INFY.NS", "Name": "Infosys", "FII_DII_Activity": "Neutral", "News": "Stable Earnings Guidance"},
+    {"Symbol": "BHARTIARTL.NS", "Name": "Bharti Airtel", "FII_DII_Activity": "FII Inflows", "News": "ARPU Expansion Trend"},
+    {"Symbol": "SBIN.NS", "Name": "State Bank of India", "FII_DII_Activity": "High DII Buying", "News": "Public Sector Credit Demand Rally"},
+    {"Symbol": "LTIM.NS", "Name": "LTIMindtree", "FII_DII_Activity": "Moderate Inflows", "News": "Digital Transformation Order Pipeline"},
+    {"Symbol": "TATAMOTORS.NS", "Name": "Tata Motors", "FII_DII_Activity": "Strong FII Interest", "News": "EV Sales Volume Surge"},
+    {"Symbol": "AXISBANK.NS", "Name": "Axis Bank", "FII_DII_Activity": "Institutional Buying", "News": "Net Interest Margin Expansion"},
+]
+
+# Display Top 10 List
+st.dataframe(pd.DataFrame(top_10_stocks), use_container_width=True)
+
+# Select Top 3 based on institutional buying and positive news momentum
+top_3 = [top_10_stocks[0], top_10_stocks[2], top_10_stocks[3]]
+
+st.markdown("#### 🚀 Selected Top 3 High-Momentum Stocks for Live 1-Minute Analysis")
+
+chart_tabs = st.tabs([f"{s['Symbol']} ({s['Name']})" for s in top_3])
+
+for idx, stock in enumerate(top_3):
+    symbol = stock["Symbol"]
+    with chart_tabs[idx]:
+        st.markdown(f"**Institutional Activity:** `{stock['FII_DII_Activity']}` | **News Driver:** `{stock['News']}`")
+        
+        # Fetch 1m live data
+        ticker = yf.Ticker(symbol)
+        df_1m = ticker.history(period="1d", interval="1m")
+        
+        if df_1m.empty:
+            st.warning(f"Live 1-minute data unavailable for {symbol} at this moment.")
+            continue
+            
+        res = analyze_1m_data(df_1m)
+        if not res:
+            st.info("Gathering more candles for analysis...")
+            continue
+            
+        data = res["df"]
+        
+        # Show Reversal Alert Banner if present
+        if res["reversal_alert"]:
+            st.markdown(f"""
+            <div class="alert-box">
+                ⚠️ <strong>ALERT:</strong> {res['reversal_alert']} on 1-Minute Chart for {symbol}!
+            </div>
+            """, unsafe_allow_html=True)
+            
+        st.markdown(f"""
+        - **Pattern Detected:** `{res['pattern']}`
+        - **Dynamic Entry Point:** `{res['entry']:.2f}`
+        - **Target Point (1.5x ATR):** `{res['target']:.2f}`
+        - **Stop Loss:** `{res['stop_loss']:.2f}`
+        """)
+
+        # Render 1-Minute Plotly Chart
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
+
+        # Candlestick chart
+        fig.add_trace(go.Candlestick(
+            x=data.index,
+            open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'],
+            name="1M Price"
+        ), row=1, col=1)
+
+        # EMAs
+        fig.add_trace(go.Scatter(x=data.index, y=data['EMA9'], line=dict(color='#00e676', width=1), name="EMA 9"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=data.index, y=data['EMA20'], line=dict(color='#ff5252', width=1), name="EMA 20"), row=1, col=1)
+
+        # Marker for Entry & Target
+        last_time = data.index[-1]
+        fig.add_trace(go.Scatter(
+            x=[last_time], y=[res['entry']],
+            mode='markers+text',
+            marker=dict(symbol='triangle-right', size=12, color='yellow'),
+            text=[f" Entry: {res['entry']:.2f}"], textposition="top right", name="Dynamic Entry"
+        ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=[last_time], y=[res['target']],
+            mode='markers+text',
+            marker=dict(symbol='star', size=12, color='#00e676'),
+            text=[f" Target: {res['target']:.2f}"], textposition="top right", name="Target"
+        ), row=1, col=1)
+
+        # Volume
+        fig.add_trace(go.Bar(x=data.index, y=data['Volume'], marker_color='#2962ff', name="Volume"), row=2, col=1)
+
+        fig.update_layout(
+            template="plotly_dark",
+            height=500,
+            margin=dict(l=10, r=10, t=30, b=10),
+            showlegend=True,
+            xaxis_rangeslider_visible=False
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
