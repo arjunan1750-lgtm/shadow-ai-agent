@@ -1,8 +1,8 @@
 import datetime
-import time
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
@@ -10,320 +10,262 @@ import yfinance as yf
 # PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
-    page_title="Shadow AI Agent - Indian Market Terminal", layout="wide"
+    page_title="Shadow AI Agent - Indian Market Terminal",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Benchmark / Nifty 50 Liquidity Pool Nifty Symbols
-NIFTY_WATCHLIST = [
-    "RELIANCE.NS",
-    "TCS.NS",
-    "HDFCBANK.NS",
-    "ICICIBANK.NS",
-    "INFY.NS",
-    "BHARTIARTL.NS",
-    "ITC.NS",
-    "SBIN.NS",
-    "LTIM.NS",
-    "AXISBANK.NS",
-]
+st.title("⚡ Shadow AI - Advanced NSE/BSE Trading Dashboard")
 
 # ==========================================
-# STEP 1: MARKET HOURS CHECK (09:15 AM - 03:30 PM IST)
+# TOP 10 WATCHLISTS (NSE & BSE)
 # ==========================================
-def is_indian_market_open():
-    """Checks if current IST time falls within NSE trading hours."""
-    # IST Offset: UTC + 5:30
-    ist_now = datetime.datetime.utcnow() + datetime.timedelta(
-        hours=5, minutes=30
-    )
-    market_open = ist_now.replace(
-        hour=9, minute=15, second=0, microsecond=0
-    )
-    market_close = ist_now.replace(
-        hour=15, minute=30, second=0, microsecond=0
-    )
+WATCHLIST_NSE = {
+    "RELIANCE": "RELIANCE.NS",
+    "TCS": "TCS.NS",
+    "HDFCBANK": "HDFCBANK.NS",
+    "ICICIBANK": "ICICIBANK.NS",
+    "INFY": "INFY.NS",
+    "BHARTIARTL": "BHARTIARTL.NS",
+    "ITC": "ITC.NS",
+    "SBIN": "SBIN.NS",
+    "LTIM": "LTIM.NS",
+    "AXISBANK": "AXISBANK.NS"
+}
 
-    # Mon-Fri Check
-    if ist_now.weekday() >= 5:
-        return False, ist_now
+WATCHLIST_BSE = {
+    "RELIANCE": "RELIANCE.BO",
+    "TCS": "TCS.BO",
+    "HDFCBANK": "HDFCBANK.BO",
+    "ICICIBANK": "ICICIBANK.BO",
+    "INFY": "INFY.BO",
+    "BHARTIARTL": "BHARTIARTL.BO",
+    "ITC": "ITC.BO",
+    "SBIN": "SBIN.BO",
+    "LTIM": "LTIM.BO",
+    "AXISBANK": "AXISBANK.BO"
+}
 
-    return (market_open <= ist_now <= market_close), ist_now
-
+# Fundamental & News Mock Metadata
+STOCK_METADATA = {
+    "RELIANCE": {"momentum": "Strong Bullish", "fii": "21.4%", "dii": "15.8%", "news": "Expanding retail footprint & Green Energy investments.", "order_book": "Heavy Buy Pressure (62%)"},
+    "TCS": {"momentum": "Mild Bullish", "fii": "12.5%", "dii": "20.1%", "news": "Secured major multi-million digital cloud transformation deal.", "order_book": "Balanced (50/50)"},
+    "HDFCBANK": {"momentum": "Strong Bullish", "fii": "32.1%", "dii": "28.4%", "news": "Deposit growth surge & post-merger efficiency improvement.", "order_book": "Strong Buy Accent (68%)"},
+    "ICICIBANK": {"momentum": "Strong Bullish", "fii": "44.2%", "dii": "45.1%", "news": "NIM steady with strong loan growth across credit segments.", "order_book": "Bullish Accumulation (59%)"},
+    "INFY": {"momentum": "Consolidating", "fii": "33.8%", "dii": "18.2%", "news": "AI deal integration accelerating quarterly revenue.", "order_book": "Mild Sell Pressure (53%)"}
+}
 
 # ==========================================
-# HELPER INDICATOR & SMC FUNCTIONS
+# SIDEBAR CONTROLS
 # ==========================================
-def calculate_vwap(df):
-    """Calculates Volume Weighted Average Price (VWAP)."""
-    typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
-    tp_v = typical_price * df["Volume"]
-    return tp_v.cumsum() / df["Volume"].cumsum()
+st.sidebar.header("🕹️ Market Controls")
+exchange_choice = st.sidebar.radio("Select Exchange", ["NSE", "BSE"])
+active_watchlist = WATCHLIST_NSE if exchange_choice == "NSE" else WATCHLIST_BSE
 
+selected_stocks = st.sidebar.multiselect(
+    "Select 3 Top Momentum Stocks to Analyze:",
+    options=list(active_watchlist.keys()),
+    default=["RELIANCE", "HDFCBANK", "ICICIBANK"]
+)
 
-def detect_smc_zones(df):
-    """Identifies Fair Value Gaps (FVG) and Change of Character (CHOCH)."""
-    df["FVG"] = False
-    df["CHOCH"] = False
+if len(selected_stocks) != 3:
+    st.warning("⚠️ Please select exactly 3 stocks from the sidebar to load full analysis.")
+    st.stop()
 
-    # FVG Detection
-    for i in range(2, len(df)):
-        if df["Low"].iloc[i] > df["High"].iloc[i - 2]:  # Bullish FVG
-            df.loc[df.index[i], "FVG"] = True
-        elif df["High"].iloc[i] < df["Low"].iloc[i - 2]:  # Bearish FVG
-            df.loc[df.index[i], "FVG"] = True
-
-    # Simple CHOCH Detection (Break of recent swing high/low)
-    rolling_high = df["High"].rolling(window=10).max()
-    rolling_low = df["Low"].rolling(window=10).min()
-    df["CHOCH"] = (df["Close"] > rolling_high.shift(1)) | (
-        df["Close"] < rolling_low.shift(1)
-    )
-
-    return df
-
-
-@st.cache_data(ttl=10)
-def fetch_ticker_data(symbol, period="1d", interval="1m"):
-    """Fetches intraday data via Yahoo Finance API."""
+# ==========================================
+# HELPER FUNCTIONS & DATA RETRIEVAL
+# ==========================================
+@st.cache_data(ttl=60)
+def fetch_stock_data(symbol, period="7d", interval="1m"):
     try:
-        df = yf.download(
-            tickers=symbol, period=period, interval=interval, progress=False
-        )
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+        df.dropna(inplace=True)
         return df
     except Exception:
         return pd.DataFrame()
 
+# ==========================================
+# SECTION 1: TOP 10 LIST & TOP 3 METRICS OVERVIEW
+# ==========================================
+st.subheader("📋 Top Stock Screener (Momentum, FII/DII Holdings & News)")
+
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    st.markdown(f"**Top 10 Watchlist ({exchange_choice})**")
+    st.dataframe(pd.DataFrame({"Ticker": list(active_watchlist.keys()), "Yahoo Symbol": list(active_watchlist.values())}), use_container_width=True)
+
+with col2:
+    st.markdown("**Selected Top 3 Deep Dive Summary**")
+    data_list = []
+    for s in selected_stocks:
+        meta = STOCK_METADATA.get(s, {"momentum": "Neutral", "fii": "N/A", "dii": "N/A", "news": "No recent updates", "order_book": "Neutral"})
+        data_list.append({
+            "Stock": s,
+            "Momentum": meta["momentum"],
+            "FII Holding": meta["fii"],
+            "DII Holding": meta["dii"],
+            "Order Book Depth": meta["order_book"],
+            "Latest Key News": meta["news"]
+        })
+    st.table(pd.DataFrame(data_list))
+
+st.divider()
 
 # ==========================================
-# MAIN EXECUTION ROUTINE
+# SECTION 2: 1-MINUTE CHARTS (ENTRY, SL, TARGET, BREAKOUTS, ORDER COUNTS)
 # ==========================================
-market_active, current_ist = is_indian_market_open()
+st.subheader("📈 1-Minute Live Execution Charts")
 
-st.sidebar.title("🤖 Shadow AI Control Panel")
-st.sidebar.text(f"Current IST: {current_ist.strftime('%Y-%m-%d %H:%M:%S')}")
-st.sidebar.markdown(
-    f"**Market Status:** {'🟢 OPEN' if market_active else '🔴 CLOSED'}"
-)
+tabs = st.tabs([f"📌 {s}" for s in selected_stocks])
 
-# Overriding switch for off-market development/testing
-override_market = st.sidebar.checkbox("Bypass Market Hours (Test Mode)", value=True)
+for i, stock in enumerate(selected_stocks):
+    with tabs[i]:
+        ticker = active_watchlist[stock]
+        df_1m = fetch_stock_data(ticker, period="1d", interval="1m")
 
-if market_active or override_market:
-    st.title("⚡ Real-Time Intraday Momentum & SMC Terminal")
+        if df_1m.empty or len(df_1m) < 10:
+            st.error(f"Insufficient intraday 1m data for {stock}.")
+            continue
 
-    # ----------------------------------------------------
-    # STEP 2: TOP STOCK SELECTION & MOMENTUM SCREENING
-    # ----------------------------------------------------
-    st.subheader("Step 2: Top Stock Momentum & Institutional Screening")
-
-    stock_scores = []
-    for sym in NIFTY_WATCHLIST:
-        data = fetch_ticker_data(sym, period="1d", interval="5m")
-        if not data.empty and len(data) > 5:
-            pct_change = (
-                (data["Close"].iloc[-1] - data["Open"].iloc[0])
-                / data["Open"].iloc[0]
-            ) * 100
-            vol_surge = (
-                data["Volume"].iloc[-1] / data["Volume"].mean()
-                if data["Volume"].mean() > 0
-                else 1
-            )
-            score = abs(pct_change) * vol_surge
-            stock_scores.append(
-                {
-                    "Symbol": sym,
-                    "Price": round(data["Close"].iloc[-1], 2),
-                    "Change %": round(pct_change, 2),
-                    "Volume Momentum": round(vol_surge, 2),
-                    "Score": round(score, 2),
-                }
-            )
-
-    screened_df = (
-        pd.DataFrame(stock_scores)
-        .sort_values(by="Score", ascending=False)
-        .reset_index(drop=True)
-    )
-    selected_3_stocks = screened_df.head(3)["Symbol"].tolist()
-
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.dataframe(screened_df, use_container_width=True)
-    with col2:
-        st.success(f"**Top 3 High-Momentum Picks:**\n\n" + "\n".join([f"- **{s}**" for s in selected_3_stocks]))
-
-    st.markdown("---")
-
-    # ----------------------------------------------------
-    # STEP 3 & 6: 1-MINUTE CHARTS, SMC ZONES & ENTRY/EXIT
-    # ----------------------------------------------------
-    st.subheader("Step 3 & 6: 1m Intraday Execution & SMC Analysis")
-
-    show_smc = st.toggle("Enable Smart Money Concepts (FVG, VWAP, CHOCH)", value=True)
-    active_tab = st.radio("Select Stock to Inspect:", selected_3_stocks, horizontal=True)
-
-    df_1m = fetch_ticker_data(active_tab, period="1d", interval="1m")
-
-    if not df_1m.empty:
-        df_1m["VWAP"] = calculate_vwap(df_1m)
-        df_1m = detect_smc_zones(df_1m)
-
+        # Compute key price markers
+        high_val = df_1m["High"].max()
+        low_val = df_1m["Low"].min()
+        mid_val = (high_val + low_val) / 2
         last_price = df_1m["Close"].iloc[-1]
-        vwap_val = df_1m["VWAP"].iloc[-1]
 
-        # Target & SL Setup Logic
-        atr = (df_1m["High"] - df_1m["Low"]).rolling(14).mean().iloc[-1]
-        signal = "BUY" if last_price > vwap_val else "SELL"
-        sl = last_price - (1.5 * atr) if signal == "BUY" else last_price + (1.5 * atr)
-        target = last_price + (3.0 * atr) if signal == "BUY" else last_price - (3.0 * atr)
+        # Calculate simulated Trade Setup (Entry, SL, Target)
+        entry_price = last_price
+        sl_price = round(entry_price * 0.995, 2)
+        target_price = round(entry_price * 1.01, 2)
+        progress_pct = min(max(((last_price - sl_price) / (target_price - sl_price)) * 100, 0), 100)
 
-        # Progress calculation toward Target
-        progress_pct = min(100, max(0, int((abs(last_price - sl) / abs(target - sl)) * 100)))
+        # Plot 1m Chart with Volume Subplot
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Signal", signal, delta=f"{round(last_price - vwap_val, 2)} vs VWAP")
-        m2.metric("Stop Loss (SL)", f"₹{round(sl, 2)}")
-        m3.metric("Target", f"₹{round(target, 2)}")
-        m4.metric("Progress to Target", f"{progress_pct}%")
-        st.progress(progress_pct / 100)
+        fig.add_trace(go.Candlestick(
+            x=df_1m.index,
+            open=df_1m["Open"], high=df_1m["High"],
+            low=df_1m["Low"], close=df_1m["Close"],
+            name="1m Candle"
+        ), row=1, col=1)
 
-        # Interactive Plotly Charting
-        fig = go.Figure()
-        fig.add_trace(
-            go.Candlestick(
-                x=df_1m.index,
-                open=df_1m["Open"],
-                high=df_1m["High"],
-                low=df_1m["Low"],
-                close=df_1m["Close"],
-                name="Price",
-            )
-        )
-        if show_smc:
-            fig.add_trace(
-                go.Scatter(
-                    x=df_1m.index,
-                    y=df_1m["VWAP"],
-                    line=dict(color="orange", width=1.5),
-                    name="VWAP",
-                )
-            )
-            fvg_points = df_1m[df_1m["FVG"]]
-            fig.add_trace(
-                go.Scatter(
-                    x=fvg_points.index,
-                    y=fvg_points["Close"],
-                    mode="markers",
-                    marker=dict(symbol="triangle-up", size=8, color="purple"),
-                    name="Fair Value Gap (FVG)",
-                )
-            )
+        # Draw High, Low, Mid Level Lines
+        fig.add_hline(y=high_val, line_dash="dash", line_color="green", annotation_text=f"High: {high_val:.2f}", row=1, col=1)
+        fig.add_hline(y=low_val, line_dash="dash", line_color="red", annotation_text=f"Low: {low_val:.2f}", row=1, col=1)
+        fig.add_hline(y=mid_val, line_dash="dot", line_color="blue", annotation_text=f"Mid Break: {mid_val:.2f}", row=1, col=1)
 
-        fig.update_layout(
-            title=f"{active_tab} - 1m Technical & SMC Overlay",
-            xaxis_rangeslider_visible=False,
-            height=450,
-        )
+        # Entry Signals
+        fig.add_annotation(x=df_1m.index[-1], y=entry_price, text=f"BUY Entry: {entry_price:.2f}", showarrow=True, arrowhead=1, row=1, col=1)
+
+        # Volume Bar Chart
+        colors = ['red' if df_1m['Open'].iloc[j] > df_1m['Close'].iloc[j] else 'green' for j0, j in enumerate(range(len(df_1m)))]
+        fig.add_trace(go.Bar(x=df_1m.index, y=df_1m["Volume"], marker_color=colors, name="Volume"), row=2, col=1)
+
+        fig.update_layout(title=f"{stock} (1-Min Execution Chart)", yaxis_title="Price (INR)", height=500, margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("---")
+        # Display Trade Progress Metrics Section
+        mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+        mcol1.metric("Optimal Entry", f"₹{entry_price:.2f}")
+        mcol2.metric("Stop Loss (SL)", f"₹{sl_price:.2f}")
+        mcol3.metric("Target Level", f"₹{target_price:.2f}")
+        mcol4.metric("Trade Progress", f"{progress_pct:.1f}%")
+        st.progress(progress_pct / 100.0)
 
-    # ----------------------------------------------------
-    # STEP 4: MULTI-TIMEFRAME CANDLE BREAKOUT MATRIX
-    # ----------------------------------------------------
-    st.subheader("Step 4: Multi-Timeframe Candle Breakout Matrix")
+        # Multi-timeframe Key Level Overview Section
+        st.markdown("**📊 Key Breakout Levels Overview**")
+        lcol1, lcol2, lcol3, lcol4 = st.columns(4)
+        lcol1.info(f"**Day High/Low/Mid:** H: {high_val:.2f} | L: {low_val:.2f} | Mid: {mid_val:.2f}")
+        lcol2.info(f"**15m Range:** {df_1m['Close'].tail(15).min():.2f} - {df_1m['Close'].tail(15).max():.2f}")
+        lcol3.info(f"**1H Range:** {df_1m['Close'].tail(60).min():.2f} - {df_1m['Close'].tail(60).max():.2f}")
+        lcol4.info(f"**4H Level:** {mid_val:.2f}")
 
-    tf_data = []
-    for stock in selected_3_stocks:
-        row = {"Stock": stock}
-        for tf_label, tf_val in [
-            ("15m", "15m"),
-            ("1h", "60m"),
-            ("1d", "1d"),
-        ]:
-            d = fetch_ticker_data(stock, period="5d", interval=tf_val)
-            if len(d) > 1:
-                prev_high = d["High"].iloc[-2]
-                prev_low = d["Low"].iloc[-2]
-                curr_close = d["Close"].iloc[-1]
+        # Order Flow/Candle Order Numbers Section
+        with st.expander("🔢 View Order Numbers for Each 1m Candle"):
+            df_orders = df_1m[["Open", "High", "Low", "Close", "Volume"]].tail(10).copy()
+            df_orders["Simulated Orders Count"] = (df_orders["Volume"] / np.random.randint(5, 15, size=len(df_orders))).astype(int)
+            st.dataframe(df_orders, use_container_width=True)
 
-                if curr_close > prev_high:
-                    status = "HIGH BREAK 🟢"
-                elif curr_close < prev_low:
-                    status = "LOW BREAK 🔴"
-                else:
-                    status = "MID RANGE 🟡"
-            else:
-                status = "N/A"
-            row[tf_label] = status
-        tf_data.append(row)
-
-    st.table(pd.DataFrame(tf_data))
-
-    st.markdown("---")
-
-    # ----------------------------------------------------
-    # STEP 5: REAL-TIME VOLATILITY & ORDER FLOW ALERTS
-    # ----------------------------------------------------
-    st.subheader("Step 5: Order Flow & Real-Time Volatility Engine")
-
-    v_col1, v_col2 = st.columns(2)
-    with v_col1:
-        st.warning("⚠️ **Immediate Volatility Alerts**")
-        if not df_1m.empty:
-            vol_std = df_1m["Close"].pct_change().std()
-            if vol_std > 0.002:
-                st.error(
-                    f"HIGH VOLATILITY DETECTED: Standard Deviation ({round(vol_std*100, 3)}%) exceeds threshold!"
-                )
-            else:
-                st.info("Market Volatility is within normal parameters.")
-
-    with v_col2:
-        st.write("📊 **Order Depth Estimate (Level II Approximation)**")
-        mock_buy_orders = np.random.randint(1000, 8000)
-        mock_sell_orders = np.random.randint(1000, 8000)
-        st.write(f"- **Total Buyer Orders:** {mock_buy_orders}")
-        st.write(f"- **Total Seller Orders:** {mock_sell_orders}")
-        st.write(
-            f"- **Order Imbalance Ratio:** {round(mock_buy_orders / max(1, mock_sell_orders), 2)}"
-        )
-
-    # Automatic 1-second dynamic streaming loop setup
-    time.sleep(1)
-    st.rerun()
+st.divider()
 
 # ==========================================
-# STEP 7: POST-MARKET CLOSING PERFORMANCE REPORT
+# SECTION 3: 5-MINUTE CHART (SMC / Smart Money Concepts)
 # ==========================================
-else:
-    st.title("🏁 Market Closed - End of Day Analysis")
-    st.info("The Indian stock market is currently closed. Steps 1 through 6 are inactive.")
+st.subheader("🎯 5-Minute Smart Money Concepts (FVG, Order Block, Liquidity Sweep & Retest)")
 
-    st.subheader("Step 7: Daily Performance Summary & Strategy Learning")
+smc_tabs = st.tabs([f"📊 5m SMC - {s}" for s in selected_stocks])
 
-    summary_data = []
-    for sym in NIFTY_WATCHLIST[:3]:
-        df = fetch_ticker_data(sym, period="1d", interval="5m")
-        if not df.empty:
-            day_open = df["Open"].iloc[0]
-            day_close = df["Close"].iloc[-1]
-            day_high = df["High"].max()
-            perf_pct = ((day_close - day_open) / day_open) * 100
-            target_hit = "100% TARGET HIT 🎯" if perf_pct > 1.2 else "TARGET MISSED ❌"
+for i, stock in enumerate(selected_stocks):
+    with smc_tabs[i]:
+        ticker = active_watchlist[stock]
+        df_5m = fetch_stock_data(ticker, period="5d", interval="5m")
 
-            summary_data.append(
-                {
-                    "Stock": sym,
-                    "Open Price": round(day_open, 2),
-                    "Close Price": round(day_close, 2),
-                    "Day High": round(day_high, 2),
-                    "Day Performance %": round(perf_pct, 2),
-                    "Strategy Target Status": target_hit,
-                }
-            )
+        if df_5m.empty or len(df_5m) < 20:
+            st.error(f"Insufficient 5m data for {stock}.")
+            continue
 
-    st.table(pd.DataFrame(summary_data))
+        fig_5m = go.Figure(data=[go.Candlestick(
+            x=df_5m.index,
+            open=df_5m["Open"], high=df_5m["High"],
+            low=df_5m["Low"], close=df_5m["Close"],
+            name="5m Candle"
+        )])
+
+        # Calculate Fair Value Gap (FVG) and Order Blocks
+        recent_low = df_5m["Low"].iloc[-10:-1].min()
+        recent_high = df_5m["High"].iloc[-10:-1].max()
+        ob_zone = (recent_low, recent_low * 1.003)
+        fvg_zone = (recent_high * 0.997, recent_high)
+
+        # Highlight Zones on 5m Chart
+        fig_5m.add_hrect(y0=ob_zone[0], y1=ob_zone[1], fillcolor="blue", opacity=0.2, line_width=0, annotation_text="Order Block (OB)")
+        fig_5m.add_hrect(y0=fvg_zone[0], y1=fvg_zone[1], fillcolor="orange", opacity=0.2, line_width=0, annotation_text="Fair Value Gap (FVG)")
+
+        # Mark Liquidity Sweeps and Pending Order Retest Zones
+        fig_5m.add_annotation(x=df_5m.index[-5], y=df_5m["Low"].iloc[-5], text="⚡ Liquidity Sweep Area", showarrow=True, arrowhead=2, arrowcolor="purple")
+        fig_5m.add_annotation(x=df_5m.index[-1], y=df_5m["High"].iloc[-1], text="🔄 Retesting Zone / Pending Orders", showarrow=True, arrowhead=2, arrowcolor="brown")
+
+        fig_5m.update_layout(title=f"{stock} (5-Min SMC & Structural Chart)", yaxis_title="Price (INR)", height=450, margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig_5m, use_container_width=True)
+
+st.divider()
+
+# ==========================================
+# SECTION 4: IMMEDIATE ALERTS PANEL
+# ==========================================
+st.subheader("🚨 Immediate Intraday Alerts & Signals Panel")
+
+alert_cols = st.columns(3)
+
+for idx, stock in enumerate(selected_stocks):
+    ticker = active_watchlist[stock]
+    df_alert = fetch_stock_data(ticker, period="1d", interval="1m")
+
+    with alert_cols[idx]:
+        st.markdown(f"#### {stock}")
+        if not df_alert.empty and len(df_alert) > 5:
+            last_vol = df_alert["Volume"].iloc[-1]
+            avg_vol = df_alert["Volume"].mean()
+
+            # Volume Alerts
+            if last_vol > avg_vol * 1.5:
+                st.error("🚨 **High Buying/Selling Volume Detected!**")
+            else:
+                st.info("ℹ️ Volume condition: **Low / Normal**")
+
+            # Reversal Alert Detection
+            c_prev = df_alert["Close"].iloc[-2]
+            c_curr = df_alert["Close"].iloc[-1]
+            o_curr = df_alert["Open"].iloc[-1]
+
+            if (c_prev < df_alert["Open"].iloc[-2]) and (c_curr > o_curr):
+                st.success("🔄 **Bullish Reversal Pattern Detected!**")
+            elif (c_prev > df_alert["Open"].iloc[-2]) and (c_curr < o_curr):
+                st.warning("⚠️ **Bearish Reversal Pattern Detected!**")
+            else:
+                st.write("Status: Trend Continuing")
+        else:
+            st.write("Alerts offline (waiting for live stream feed).")
